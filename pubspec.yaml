@@ -1,0 +1,21 @@
+name: mifare_classic_tools
+description: MIFARE Classic 1K reader and tools.
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.9.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_nfc_kit: ^3.6.0-rc.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

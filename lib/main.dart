@@ -33,7 +33,9 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   bool _scanning = false;
+
   String _status = 'Pronto';
+
   String _tagInfo = '';
 
   Future<void> _scanNfc() async {
@@ -77,7 +79,7 @@ Standard:
 ${tag.standard}
 
 NDEF:
-${tag.ndefAvailable ? 'Disponibile' : 'Non disponibile'}
+${tag.ndefAvailable == true ? 'Disponibile' : 'Non disponibile'}
 
 Dimensione:
 ${tag.ndefCapacity}
@@ -169,6 +171,7 @@ ${tag.ndefType}
 
                       if (_tagInfo.isNotEmpty) ...[
                         const SizedBox(height: 20),
+
                         Align(
                           alignment: Alignment.centerLeft,
                           child: SelectableText(

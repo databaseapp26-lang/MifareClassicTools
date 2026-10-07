@@ -151,7 +151,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<SectorResult> _readSector(int sector) async {
-    String additionalKey = _normalizeKey(_additionalKey);
+    final additionalKey = _normalizeKey(_additionalKey);
 
     final keys = <String>[
       if (additionalKey.isNotEmpty) additionalKey,
@@ -161,42 +161,58 @@ class _HomePageState extends State<HomePage> {
     String? acceptedKey;
     String? acceptedMethod;
 
+    // ------------------------------------------------------------
+    // KEY A
+    // ------------------------------------------------------------
     for (final key in keys) {
       if (!_isValidKey(key)) continue;
 
       try {
-        await FlutterNfcKit.authenticateSector(
+        final ok = await FlutterNfcKit.authenticateSector(
           sector,
           keyA: key,
         );
 
-        acceptedKey = key;
-        acceptedMethod = 'Key A';
-        break;
+        // IMPORTANTISSIMO:
+        // authenticateSector restituisce true/false.
+        // La chiave viene considerata valida SOLO se ritorna true.
+        if (ok == true) {
+          acceptedKey = key;
+          acceptedMethod = 'Key A';
+          break;
+        }
       } catch (_) {
-        // Prova la chiave successiva.
+        // Chiave non valida o errore di comunicazione:
+        // prova la successiva.
       }
     }
 
+    // ------------------------------------------------------------
+    // KEY B
+    // ------------------------------------------------------------
     if (acceptedKey == null) {
       for (final key in keys) {
         if (!_isValidKey(key)) continue;
 
         try {
-          await FlutterNfcKit.authenticateSector(
+          final ok = await FlutterNfcKit.authenticateSector(
             sector,
             keyB: key,
           );
 
-          acceptedKey = key;
-          acceptedMethod = 'Key B';
-          break;
+          // Anche Key B deve restituire true.
+          if (ok == true) {
+            acceptedKey = key;
+            acceptedMethod = 'Key B';
+            break;
+          }
         } catch (_) {
           // Prova la chiave successiva.
         }
       }
     }
 
+    // Nessuna chiave realmente accettata.
     if (acceptedKey == null) {
       return SectorResult(
         sector: sector,
@@ -207,6 +223,9 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
+    // ------------------------------------------------------------
+    // LETTURA DEI 4 BLOCCHI DEL SETTORE
+    // ------------------------------------------------------------
     final firstBlock = sector * 4;
     final blocks = <String>[];
 
@@ -217,7 +236,7 @@ class _HomePageState extends State<HomePage> {
         final data = await FlutterNfcKit.readBlock(blockIndex);
         blocks.add(_bytesToHex(data));
       } catch (_) {
-        // Il blocco può essere protetto anche dopo l'autenticazione.
+        // Il blocco può essere protetto dagli access bits.
       }
     }
 
@@ -240,13 +259,17 @@ class _HomePageState extends State<HomePage> {
 
   bool _isValidKey(String key) {
     if (key.length != 12) return false;
+
     return RegExp(r'^[0-9A-F]{12}$').hasMatch(key);
   }
 
   String _bytesToHex(dynamic data) {
     if (data is List<int>) {
       return data
-          .map((value) => value.toRadixString(16).padLeft(2, '0').toUpperCase())
+          .map(
+            (value) =>
+                value.toRadixString(16).padLeft(2, '0').toUpperCase(),
+          )
           .join(' ');
     }
 
@@ -284,6 +307,7 @@ class _HomePageState extends State<HomePage> {
     final value = bytes.sublist(0, 4);
     final inverse = bytes.sublist(4, 8);
     final valueCopy = bytes.sublist(8, 12);
+
     final address = bytes[12];
     final addressInv = bytes[13];
     final addressCopy = bytes[14];
@@ -516,8 +540,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildProgressCard() {
-    final percent =
-        _totalBlocks == 0 ? 0 : (_blocksRead / _totalBlocks * 100).round();
+    final percent = _totalBlocks == 0
+        ? 0
+        : (_blocksRead / _totalBlocks * 100).round();
 
     return Card(
       child: Padding(
@@ -560,7 +585,9 @@ class _HomePageState extends State<HomePage> {
             onPressed: _reading ? null : _startReading,
             icon: const Icon(Icons.nfc),
             label: Text(
-              _reading ? 'LETTURA IN CORSO...' : 'LEGGI MIFARE CLASSIC',
+              _reading
+                  ? 'LETTURA IN CORSO...'
+                  : 'LEGGI MIFARE CLASSIC',
             ),
           ),
         ),
@@ -608,14 +635,17 @@ class _HomePageState extends State<HomePage> {
                   const Padding(
                     padding: EdgeInsets.only(bottom: 12),
                     child: Text(
-                      'Nessuna delle chiavi pubbliche/autorizzate disponibili '
-                      'ha consentito l\'autenticazione di questo settore.',
+                      'Nessuna delle chiavi pubbliche/autorizzate '
+                      'disponibili ha consentito l\'autenticazione '
+                      'di questo settore.',
                     ),
                   ),
                 ...List.generate(
                   sector.blocks.length,
                   (index) {
-                    final blockNumber = sector.sector * 4 + index;
+                    final blockNumber =
+                        sector.sector * 4 + index;
+
                     final hex = sector.blocks[index];
                     final value = _valueFromBlock(hex);
 
@@ -628,7 +658,8 @@ class _HomePageState extends State<HomePage> {
                         color: Colors.black26,
                       ),
                       child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
                         children: [
                           Text(
                             'BLOCK $blockNumber',

@@ -32,220 +32,158 @@ class ScannerPage extends StatefulWidget {
 class _ScannerPageState extends State<ScannerPage> {
   static const _prefsKey = 'mifare_found_keys_v1';
 
+  // Chiavi già trovate sul tag 90140ABA.
+  // Questa versione esegue solo autenticazione e lettura: NON scrive nulla.
+  static const _knownKeys = <_FoundKey>[
+    _FoundKey('90140ABA', 0, 'A', 'A0A1A2A3A4A5'),
+    _FoundKey('90140ABA', 1, 'B', '8FD0A4F256E9'),
+    _FoundKey('90140ABA', 2, 'B', 'AAFB06045877'),
+    _FoundKey('90140ABA', 3, 'A', 'E4D2770A89BE'),
+    _FoundKey('90140ABA', 4, 'A', '1999A3554A55'),
+    _FoundKey('90140ABA', 5, 'A', 'FC00018778F7'),
+    _FoundKey('90140ABA', 6, 'B', '1B61B2E78C75'),
+    _FoundKey('90140ABA', 7, 'A', '26940B21FF5D'),
+    _FoundKey('90140ABA', 8, 'B', '888888888888'),
+    _FoundKey('90140ABA', 9, 'A', 'EE0042F88840'),
+    _FoundKey('90140ABA', 10, 'B', '6F4B6D644178'),
+    _FoundKey('90140ABA', 11, 'B', '434F4D4D4F42'),
+    _FoundKey('90140ABA', 12, 'A', '64E3C10394C2'),
+    _FoundKey('90140ABA', 13, 'B', 'EE0042F88840'),
+    _FoundKey('90140ABA', 14, 'A', 'FC00018778F7'),
+    _FoundKey('90140ABA', 15, 'B', '75CCB59C9BED'),
+  ];
+
   bool _running = false;
-  bool _stopRequested = false;
-
-  List<String> _keys = [];
-
-  final List<_FoundKey> _found = [];
-
-  int _attempts = 0;
-  int _totalAttempts = 0;
-
-  String _status = 'Pronto. Premi "Scansiona tag".';
+  String _status = 'Pronto. Premi "Leggi tag".';
+  String _uid = '';
+  final List<_SectorDump> _sectors = [];
 
   @override
-  void initState() {
-    super.initState();
-    _loadKeys();
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('MIFARE Classic Tools')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(_status, style: const TextStyle(fontSize: 16)),
+            const SizedBox(height: 10),
+            if (_uid.isNotEmpty) Text('UID: $_uid'),
+            if (_running) ...[
+              const SizedBox(height: 10),
+              const LinearProgressIndicator(),
+            ],
+            const SizedBox(height: 14),
+            FilledButton(
+              onPressed: _running ? null : _readTag,
+              child: const Text('Leggi tag'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton(
+              onPressed: _running ? null : _clearResults,
+              child: const Text('Pulisci risultati'),
+            ),
+            const SizedBox(height: 14),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _sectors.length,
+                itemBuilder: (context, index) {
+                  return _sectorCard(_sectors[index]);
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
-  Future<void> _loadKeys() async {
-    try {
-      final text =
-          await rootBundle.loadString('assets/keys/authorized.keys');
+  Widget _sectorCard(_SectorDump sector) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Settore ${sector.sector} — Key ${sector.type} ${sector.key}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '${sector.readableBlocks}/4 blocchi letti',
+              style: TextStyle(
+                color: sector.readableBlocks == 4
+                    ? Colors.green.shade700
+                    : Colors.orange.shade800,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            for (final block in sector.blocks)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 7),
+                child: Text(
+                  'Blocco ${block.block}: ${block.hex}',
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 
-      final keys = <String>{};
-
-      for (final raw in text.split(RegExp(r'\r?\n'))) {
-        final k = raw
-            .trim()
-            .replaceAll(RegExp(r'\s+'), '')
-            .toUpperCase();
-
-        if (RegExp(r'^[0-9A-F]{12}$').hasMatch(k)) {
-          keys.add(k);
-        }
-      }
-
-      final saved = await _loadSaved();
-
-      /*
-       * ============================================================
-       * CHIAVI MIZIP
-       * ============================================================
-       *
-       * Queste sono le chiavi generate dall'algoritmo MiZip
-       * per il nostro UID:
-       *
-       * UID = 90140ABA
-       *
-       * Settore 0:
-       *   Key A = A0A1A2A3A4A5
-       *   Key B = B4C132439EEF
-       *
-       * Settore 1:
-       *   Key A = 9906509F19F1
-       *   Key B = FB961447D29B
-       *
-       * Settore 2:
-       *   Key A = 3B61C38D023B
-       *   Key B = 795D09EA38FB
-       *
-       * Settore 3:
-       *   Key A = 72664B15BC1D
-       *   Key B = A0F783625C14
-       *
-       * Settore 4:
-       *   Key A = A16EBD95D484
-       *   Key B = BAA9B7332747
-       *
-       * NON scrivono nulla sul tag.
-       * Servono solamente per velocizzare il test di autenticazione.
-       * ============================================================
-       */
-
-      const miZipKeys = <String>[
-        'A0A1A2A3A4A5',
-        'B4C132439EEF',
-
-        '9906509F19F1',
-        'FB961447D29B',
-
-        '3B61C38D023B',
-        '795D09EA38FB',
-
-        '72664B15BC1D',
-        'A0F783625C14',
-
-        'A16EBD95D484',
-        'BAA9B7332747',
-      ];
-
-      /*
-       * Ordine delle chiavi:
-       *
-       * 1. Chiavi già trovate e salvate sul telefono
-       * 2. Chiavi MiZip generate per il nostro UID
-       * 3. Tutte le altre 2477 chiavi del database
-       *
-       * In questo modo non perdiamo il database originale.
-       */
-
-      final ordered = <String>[];
-
-      for (final savedKey in saved.map((e) => e.key)) {
-        if (!ordered.contains(savedKey)) {
-          ordered.add(savedKey);
-        }
-      }
-
-      for (final key in miZipKeys) {
-        if (!ordered.contains(key)) {
-          ordered.add(key);
-        }
-      }
-
-      for (final key in keys) {
-        if (!ordered.contains(key)) {
-          ordered.add(key);
-        }
-      }
-
-      if (mounted) {
-        setState(() {
-          _keys = ordered;
-
-          _status =
-              'Caricate ${keys.length} chiavi candidate. '
-              'Chiavi MiZip prioritarie: ${miZipKeys.length}.';
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _status = 'Errore caricamento chiavi: $e');
-      }
-    }
+  void _clearResults() {
+    setState(() {
+      _sectors.clear();
+      _uid = '';
+      _status = 'Risultati cancellati. Premi "Leggi tag".';
+    });
   }
 
   Future<List<_FoundKey>> _loadSaved() async {
     final prefs = await SharedPreferences.getInstance();
-
     final raw = prefs.getStringList(_prefsKey) ?? const [];
 
-    return raw
-        .map((s) {
-          final p = s.split('|');
-
-          if (p.length != 4) {
-            return _FoundKey('', -1, '', '');
-          }
-
-          return _FoundKey(
-            p[0],
-            int.tryParse(p[1]) ?? -1,
-            p[2],
-            p[3],
-          );
-        })
-        .where(
-          (e) => e.key.isNotEmpty && e.sector >= 0,
-        )
-        .toList();
-  }
-
-  Future<void> _saveFound(String uid) async {
-    final prefs = await SharedPreferences.getInstance();
-
-    final existing =
-        prefs.getStringList(_prefsKey) ?? <String>[];
-
-    final map = <String, String>{};
-
-    for (final item in existing) {
-      final p = item.split('|');
-
-      if (p.length == 4) {
-        map['${p[0]}|${p[1]}|${p[2]}'] = item;
+    return raw.map((s) {
+      final p = s.split('|');
+      if (p.length != 4) {
+        return const _FoundKey('', -1, '', '');
       }
-    }
-
-    for (final f in _found) {
-      map['$uid|${f.sector}|${f.type}'] =
-          '$uid|${f.sector}|${f.type}|${f.key}';
-    }
-
-    await prefs.setStringList(
-      _prefsKey,
-      map.values.toList(),
-    );
+      return _FoundKey(
+        p[0],
+        int.tryParse(p[1]) ?? -1,
+        p[2],
+        p[3],
+      );
+    }).where((e) => e.uid.isNotEmpty && e.sector >= 0).toList();
   }
 
-  Future<void> _scan() async {
+  Future<void> _readTag() async {
     if (_running) return;
 
     setState(() {
       _running = true;
-      _stopRequested = false;
-      _found.clear();
-      _attempts = 0;
       _status = 'Controllo NFC...';
+      _uid = '';
+      _sectors.clear();
     });
 
     try {
-      final availability =
-          await FlutterNfcKit.nfcAvailability;
-
+      final availability = await FlutterNfcKit.nfcAvailability;
       if (availability != NFCAvailability.available) {
-        throw StateError(
-          'NFC non disponibile o disabilitato.',
-        );
+        throw StateError('NFC non disponibile o disabilitato.');
       }
 
-      setState(
-        () => _status =
-            'Avvicina il MIFARE Classic al telefono...',
-      );
+      setState(() {
+        _status = 'Avvicina il MIFARE Classic al telefono...';
+      });
 
       final tag = await FlutterNfcKit.poll(
         timeout: const Duration(seconds: 30),
@@ -255,231 +193,121 @@ class _ScannerPageState extends State<ScannerPage> {
 
       if (tag.type != NFCTagType.mifare_classic) {
         throw StateError(
-          'Tag rilevato: ${tag.type.name}. '
-          'Serve un MIFARE Classic.',
+          'Tag rilevato: ${tag.type.name}. Serve un MIFARE Classic.',
         );
       }
 
       final uid = tag.id.toUpperCase();
-
       final sectors = _sectorCount(tag);
 
-      final savedForTag = (await _loadSaved())
-          .where(
-            (e) =>
-                e.uid == uid &&
-                e.sector < sectors,
-          )
-          .toList();
-
-      /*
-       * Numero teorico massimo:
-       *
-       * settori × chiavi × 2
-       *
-       * perché ogni chiave viene provata come A e come B.
-       */
-
-      _totalAttempts =
-          sectors * _keys.length * 2;
-
       setState(() {
-        _status =
-            'UID $uid — $sectors settori — '
-            '${_keys.length} chiavi candidate.';
+        _uid = uid;
+        _status = 'UID $uid — lettura di $sectors settori...';
       });
 
-      /*
-       * ============================================================
-       * SCANSIONE SETTORI
-       * ============================================================
-       */
+      final saved = await _loadSaved();
 
-      for (
-        var sector = 0;
-        sector < sectors && !_stopRequested;
-        sector++
-      ) {
-        final known = savedForTag
-            .where(
-              (e) => e.sector == sector,
-            )
-            .toList();
+      for (var sector = 0; sector < sectors; sector++) {
+        final candidates = <_FoundKey>[];
 
-        var sectorFound = false;
-
-        /*
-         * ----------------------------------------------------------
-         * 1. PRIMA LE CHIAVI GIÀ SALVATE
-         * ----------------------------------------------------------
-         */
-
-        for (final saved in known) {
-          if (_stopRequested) break;
-
-          final ok = await _authenticate(
-            sector,
-            saved.type,
-            saved.key,
-          );
-
-          _attempts++;
-
-          if (ok) {
-            _found.add(saved);
-
-            sectorFound = true;
-
-            setState(
-              () => _status =
-                  'Settore $sector: '
-                  '${saved.type} ${saved.key} '
-                  '(memorizzata)',
-            );
-
-            break;
+        for (final item in saved) {
+          if (item.uid == uid && item.sector == sector) {
+            if (!candidates.any(
+              (x) => x.type == item.type && x.key == item.key,
+            )) {
+              candidates.add(item);
+            }
           }
         }
 
-        if (sectorFound) {
+        for (final item in _knownKeys) {
+          if (item.uid == uid && item.sector == sector) {
+            if (!candidates.any(
+              (x) => x.type == item.type && x.key == item.key,
+            )) {
+              candidates.add(item);
+            }
+          }
+        }
+
+        if (candidates.isEmpty) {
+          setState(() {
+            _status = 'Settore $sector: nessuna chiave disponibile.';
+          });
           continue;
         }
 
-        /*
-         * ----------------------------------------------------------
-         * 2. POI LE CHIAVI DEL DATABASE
-         *
-         * Le prime sono le chiavi MiZip.
-         * Successivamente arrivano tutte le altre.
-         *
-         * Per ogni chiave:
-         *   prima Key A
-         *   poi Key B
-         * ----------------------------------------------------------
-         */
+        _FoundKey? workingKey;
 
-        for (final key in _keys) {
-          if (_stopRequested || sectorFound) {
-            break;
-          }
-
-          /*
-           * ==========================
-           * KEY A
-           * ==========================
-           */
-
-          final a = await _authenticate(
+        for (final candidate in candidates) {
+          if (await _authenticate(
             sector,
-            'A',
-            key,
-          );
-
-          _attempts++;
-
-          if (a) {
-            final f = _FoundKey(
-              uid,
-              sector,
-              'A',
-              key,
-            );
-
-            _found.add(f);
-
-            await _saveFound(uid);
-
-            sectorFound = true;
-
-            setState(
-              () => _status =
-                  'Trovata Key A: '
-                  'settore $sector → $key',
-            );
-
+            candidate.type,
+            candidate.key,
+          )) {
+            workingKey = candidate;
             break;
-          }
-
-          /*
-           * ==========================
-           * KEY B
-           * ==========================
-           */
-
-          final b = await _authenticate(
-            sector,
-            'B',
-            key,
-          );
-
-          _attempts++;
-
-          if (b) {
-            final f = _FoundKey(
-              uid,
-              sector,
-              'B',
-              key,
-            );
-
-            _found.add(f);
-
-            await _saveFound(uid);
-
-            sectorFound = true;
-
-            setState(
-              () => _status =
-                  'Trovata Key B: '
-                  'settore $sector → $key',
-            );
-
-            break;
-          }
-
-          /*
-           * Aggiorna la UI ogni 10 tentativi.
-           */
-
-          if (_attempts % 10 == 0 &&
-              mounted) {
-            setState(
-              () => _status =
-                  'Settore $sector — '
-                  'tentativi $_attempts / '
-                  '$_totalAttempts',
-            );
           }
         }
 
-        if (!sectorFound &&
-            mounted) {
-          setState(
-            () => _status =
-                'Settore $sector: '
-                'nessuna chiave trovata.',
-          );
+        if (workingKey == null) {
+          setState(() {
+            _status = 'Settore $sector: autenticazione fallita.';
+          });
+          continue;
+        }
+
+        final blocks = <_BlockDump>[];
+        var readable = 0;
+        final firstBlock = sector * 4;
+
+        for (var offset = 0; offset < 4; offset++) {
+          final blockNumber = firstBlock + offset;
+
+          try {
+            final data = await FlutterNfcKit.readBlock(blockNumber);
+            final hex = _toHex(data);
+            blocks.add(_BlockDump(blockNumber, hex));
+            readable++;
+          } catch (_) {
+            blocks.add(_BlockDump(blockNumber, 'ERRORE LETTURA'));
+          }
+        }
+
+        final result = _SectorDump(
+          sector,
+          workingKey.type,
+          workingKey.key,
+          readable,
+          blocks,
+        );
+
+        if (mounted) {
+          setState(() {
+            _sectors.add(result);
+            _status =
+                'Letto settore $sector/$sectors — $readable/4 blocchi.';
+          });
         }
       }
 
-      if (_stopRequested) {
-        setState(
-          () => _status =
-              'Scansione interrotta. '
-              'Trovate ${_found.length} chiavi.',
+      if (mounted) {
+        final totalBlocks = _sectors.fold<int>(
+          0,
+          (sum, item) => sum + item.readableBlocks,
         );
-      } else {
-        setState(
-          () => _status =
-              'Scansione terminata. '
-              'Trovate ${_found.length} chiavi.',
-        );
+
+        setState(() {
+          _status =
+              'Lettura terminata: ${_sectors.length}/$sectors settori, '
+              '$totalBlocks/${sectors * 4} blocchi leggibili.';
+        });
       }
     } catch (e) {
       if (mounted) {
-        setState(
-          () => _status = 'Errore: $e',
-        );
+        setState(() {
+          _status = 'Errore: $e';
+        });
       }
     } finally {
       try {
@@ -487,7 +315,9 @@ class _ScannerPageState extends State<ScannerPage> {
       } catch (_) {}
 
       if (mounted) {
-        setState(() => _running = false);
+        setState(() {
+          _running = false;
+        });
       }
     }
   }
@@ -515,128 +345,15 @@ class _ScannerPageState extends State<ScannerPage> {
   }
 
   int _sectorCount(NFCTag tag) {
-    final sak =
-        (tag.sak ?? '')
-            .replaceAll('0x', '')
-            .toUpperCase();
-
-    /*
-     * MIFARE Classic 4K:
-     * SAK 0x18 → 40 settori.
-     *
-     * Altri SAK usati dalle Classic 1K/2K:
-     * → 16 settori.
-     */
-
-    if (sak == '18') {
-      return 40;
-    }
-
+    final sak = (tag.sak ?? '').replaceAll('0x', '').toUpperCase();
+    if (sak == '18') return 40;
     return 16;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'MIFARE Classic Tools',
-        ),
-      ),
-
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-
-        child: Column(
-          crossAxisAlignment:
-              CrossAxisAlignment.stretch,
-
-          children: [
-            Text(_status),
-
-            const SizedBox(height: 12),
-
-            if (_running)
-              LinearProgressIndicator(
-                value: _totalAttempts == 0
-                    ? null
-                    : (_attempts /
-                            _totalAttempts)
-                        .clamp(0.0, 1.0),
-              ),
-
-            const SizedBox(height: 12),
-
-            Text(
-              'Chiavi candidate: ${_keys.length}',
-            ),
-
-            Text(
-              'Chiavi trovate in questa scansione: '
-              '${_found.length}',
-            ),
-
-            Text(
-              'Tentativi: $_attempts'
-              '${_totalAttempts == 0 ? '' : ' / $_totalAttempts'}',
-            ),
-
-            const SizedBox(height: 20),
-
-            FilledButton(
-              onPressed:
-                  _running ? null : _scan,
-
-              child: const Text(
-                'Scansiona tag',
-              ),
-            ),
-
-            if (_running) ...[
-              const SizedBox(height: 8),
-
-              OutlinedButton(
-                onPressed: () {
-                  setState(
-                    () => _stopRequested = true,
-                  );
-                },
-
-                child: const Text(
-                  'Interrompi',
-                ),
-              ),
-            ],
-
-            const SizedBox(height: 20),
-
-            Expanded(
-              child: ListView.builder(
-                itemCount: _found.length,
-
-                itemBuilder:
-                    (context, index) {
-                  final f = _found[index];
-
-                  return ListTile(
-                    dense: true,
-
-                    title: Text(
-                      'Settore ${f.sector} — '
-                      'Key ${f.type}',
-                    ),
-
-                    subtitle: Text(
-                      f.key,
-                    ),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+  String _toHex(Iterable<int> data) {
+    return data
+        .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+        .join(' ');
   }
 }
 
@@ -646,11 +363,28 @@ class _FoundKey {
   final String type;
   final String key;
 
-  const _FoundKey(
-    this.uid,
+  const _FoundKey(this.uid, this.sector, this.type, this.key);
+}
+
+class _SectorDump {
+  final int sector;
+  final String type;
+  final String key;
+  final int readableBlocks;
+  final List<_BlockDump> blocks;
+
+  const _SectorDump(
     this.sector,
     this.type,
     this.key,
+    this.readableBlocks,
+    this.blocks,
   );
 }
 
+class _BlockDump {
+  final int block;
+  final String hex;
+
+  const _BlockDump(this.block, this.hex);
+}

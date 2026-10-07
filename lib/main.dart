@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_nfc_kit/flutter_nfc_kit.dart';
 
+import 'known_keys.dart';
+
 void main() {
   runApp(const MifareClassicToolsApp());
 }

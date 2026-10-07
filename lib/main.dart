@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_nfc_kit/flutter_nfc_kit.dart';
 
@@ -12,199 +11,484 @@ class MifareClassicToolsApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Tools',
       debugShowCheckedModeBanner: false,
+      title: 'Tools',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
         useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.indigo,
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF4F6FA),
       ),
-      home: const MifareClassicPage(),
+      home: const HomePage(),
     );
   }
 }
 
-class SectorResult {
-  final int sector;
-  final bool authenticated;
-  final String? key;
-  final String? keyType;
-  final List<BlockResult> blocks;
-  final String? authenticationError;
-  final String? trailer;
-  final String? accessBits;
-  final List<String> analysis;
-
-  const SectorResult({
-    required this.sector,
-    required this.authenticated,
-    required this.key,
-    required this.keyType,
-    required this.blocks,
-    required this.authenticationError,
-    required this.trailer,
-    required this.accessBits,
-    required this.analysis,
-  });
-}
-
-class BlockResult {
-  final int block;
-  final String data;
-  final bool success;
-  final String? error;
-  final List<String> analysis;
-
-  const BlockResult({
-    required this.block,
-    required this.data,
-    required this.success,
-    required this.error,
-    required this.analysis,
-  });
-}
-
-class MifareClassicPage extends StatefulWidget {
-  const MifareClassicPage({super.key});
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
   @override
-  State<MifareClassicPage> createState() => _MifareClassicPageState();
+  State<HomePage> createState() => _HomePageState();
 }
 
-class _MifareClassicPageState extends State<MifareClassicPage> {
-  bool _reading = false;
+class _HomePageState extends State<HomePage> {
+  // ============================================================
+  // CHIAVI CONOSCIUTE
+  //
+  // Sono solamente chiavi note/comuni.
+  // Non viene effettuato alcun cracking o brute force.
+  // ============================================================
 
-  String _status = 'Pronto';
-  String _uid = '';
-  String _technology = '';
-  String _standard = '';
-  String _ndef = '';
-
-  int _authenticatedSectors = 0;
-  int _readBlocks = 0;
-
-  List<SectorResult> _sectors = [];
-
-  /*
-   * SOLO CHIAVI NOTE/CANDIDATE.
-   *
-   * Non viene effettuato brute-force.
-   * Non vengono generate nuove chiavi.
-   */
   static const List<String> _knownKeys = [
-    // Default MIFARE Classic
     'FFFFFFFFFFFF',
     '000000000000',
-
-    // Chiavi già trovate/testate sul nostro tag
     'A0A1A2A3A4A5',
     'B0B1B2B3B4B5',
     'D3F7D3F7D3F7',
     '4D3A99C351DD',
-
-    // Chiavi comuni pubblicamente note
     'A0B0C0D0E0F0',
     'A1B1C1D1E1F1',
     'AABBCCDDEEFF',
     '714C5C886E97',
     '587EE5F9350F',
-    '0000014B5C8E',
-    'AABBCCDDEEFF',
-    '123456789ABC',
-    '123456ABCDEF',
-    '010203040506',
-    'FEDCBA987654',
     '1A982C7E459A',
-    '000000000001',
-    'FFFFFFFFFFFF',
   ];
 
-  Future<void> _startRead() async {
-    if (_reading) return;
+  final TextEditingController _extraKeyController =
+      TextEditingController();
+
+  bool _reading = false;
+
+  String _status = 'Pronto';
+
+  NFCTag? _tag;
+
+  int _authenticatedSectors = 0;
+  int _readBlocks = 0;
+
+  final List<SectorResult> _sectors = [];
+
+  @override
+  void dispose() {
+    _extraKeyController.dispose();
+    super.dispose();
+  }
+
+  // ============================================================
+  // FUNZIONI UTILI
+  // ============================================================
+
+  String _normalizeKey(String value) {
+    return value
+        .trim()
+        .replaceAll(' ', '')
+        .replaceAll(':', '')
+        .replaceAll('-', '')
+        .toUpperCase();
+  }
+
+  bool _isValidKey(String key) {
+    if (key.length != 12) {
+      return false;
+    }
+
+    return RegExp(r'^[0-9A-F]{12}$').hasMatch(key);
+  }
+
+  List<String> _allKeys() {
+    final keys = <String>[
+      ..._knownKeys,
+    ];
+
+    final extra = _normalizeKey(_extraKeyController.text);
+
+    if (_isValidKey(extra) && !keys.contains(extra)) {
+      keys.add(extra);
+    }
+
+    return keys;
+  }
+
+  String _hex(List<int> data) {
+    return data
+        .map(
+          (b) => b.toRadixString(16).padLeft(2, '0').toUpperCase(),
+        )
+        .join(' ');
+  }
+
+  String _hexCompact(List<int> data) {
+    return data
+        .map(
+          (b) => b.toRadixString(16).padLeft(2, '0').toUpperCase(),
+        )
+        .join();
+  }
+
+  String _ascii(List<int> data) {
+    return data
+        .map(
+          (b) => b >= 32 && b <= 126
+              ? String.fromCharCode(b)
+              : '.',
+        )
+        .join();
+  }
+
+  bool _isAllZero(List<int> data) {
+    return data.every((b) => b == 0);
+  }
+
+  bool _looksLikeValueBlock(List<int> data) {
+    if (data.length != 16) {
+      return false;
+    }
+
+    final value0 = data.sublist(0, 4);
+    final inverse = data.sublist(4, 8);
+    final value1 = data.sublist(8, 12);
+
+    for (int i = 0; i < 4; i++) {
+      if ((value0[i] ^ inverse[i]) != 0xFF) {
+        return false;
+      }
+
+      if (value0[i] != value1[i]) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  int _littleEndianValue(List<int> data) {
+    if (data.length < 4) {
+      return 0;
+    }
+
+    return data[0] |
+        (data[1] << 8) |
+        (data[2] << 16) |
+        (data[3] << 24);
+  }
+
+  // ============================================================
+  // DECODIFICA ACCESS BITS
+  //
+  // Per un trailer MIFARE Classic:
+  // byte 6,7,8 = access bits
+  // ============================================================
+
+  String _decodeAccessBits(List<int> block) {
+    if (block.length != 16) {
+      return 'Dati insufficienti';
+    }
+
+    final b6 = block[6];
+    final b7 = block[7];
+    final b8 = block[8];
+
+    final c1 = [
+      (b7 >> 4) & 1,
+      (b7 >> 0) & 1,
+      (b8 >> 4) & 1,
+      (b8 >> 0) & 1,
+    ];
+
+    final c2 = [
+      (b6 >> 4) & 1,
+      (b6 >> 0) & 1,
+      (b7 >> 4) & 1,
+      (b7 >> 0) & 1,
+    ];
+
+    final c3 = [
+      (b6 >> 5) & 1,
+      (b6 >> 1) & 1,
+      (b7 >> 5) & 1,
+      (b7 >> 1) & 1,
+    ];
+
+    // Controllo semplice di coerenza delle coppie complementari.
+    final valid =
+        (((b6 ^ b7) & 0x0F) == 0x0F) &&
+        (((b7 ^ b8) & 0xF0) == 0xF0);
+
+    if (!valid) {
+      return 'Access bits: $b6/$b7/$b8 - configurazione da verificare';
+    }
+
+    return 'Access bits: '
+        '${b6.toRadixString(16).padLeft(2, '0').toUpperCase()} '
+        '${b7.toRadixString(16).padLeft(2, '0').toUpperCase()} '
+        '${b8.toRadixString(16).padLeft(2, '0').toUpperCase()}'
+        '\n'
+        'C1: ${c1.join()}  '
+        'C2: ${c2.join()}  '
+        'C3: ${c3.join()}';
+  }
+
+  String _blockAnalysis(int blockNumber, List<int> data) {
+    final lines = <String>[];
+
+    if (_isAllZero(data)) {
+      lines.add('Blocco completamente vuoto');
+    }
+
+    if (_looksLikeValueBlock(data)) {
+      final value = _littleEndianValue(data);
+
+      lines.add('Possibile MIFARE Value Block');
+      lines.add('Valore raw little-endian: $value');
+    }
+
+    final ascii = _ascii(data);
+
+    if (ascii.replaceAll('.', '').isNotEmpty) {
+      lines.add('ASCII: $ascii');
+    }
+
+    if (blockNumber % 4 == 3) {
+      if (data.length == 16) {
+        lines.add('Sector Trailer');
+
+        final keyA = data.sublist(0, 6);
+        final access = data.sublist(6, 9);
+        final gpb = data[9];
+        final keyB = data.sublist(10, 16);
+
+        lines.add('Key A: ${_hex(keyA)}');
+        lines.add('Access: ${_hex(access)}');
+        lines.add(
+          'GPB: ${gpb.toRadixString(16).padLeft(2, '0').toUpperCase()}',
+        );
+        lines.add('Key B: ${_hex(keyB)}');
+
+        lines.add(_decodeAccessBits(data));
+      }
+    }
+
+    if (lines.isEmpty) {
+      return 'Nessuna analisi speciale';
+    }
+
+    return lines.join('\n');
+  }
+
+  // ============================================================
+  // LETTURA DI UN SETTORE
+  //
+  // IMPORTANTE:
+  // usiamo readBlock() singolarmente.
+  // È il metodo che ha funzionato correttamente sul tuo tag.
+  // ============================================================
+
+  Future<SectorResult> _readSector(int sector) async {
+    String? usedKey;
+    String? usedKeyType;
+
+    // ------------------------------------------------------------
+    // 1. Tentiamo le chiavi conosciute
+    // ------------------------------------------------------------
+
+    for (final key in _allKeys()) {
+      try {
+        final ok = await FlutterNfcKit.authenticateSector(
+          sector,
+          keyA: key,
+        );
+
+        if (ok) {
+          usedKey = key;
+          usedKeyType = 'Key A';
+          break;
+        }
+      } catch (_) {
+        // Proviamo la chiave successiva.
+      }
+
+      try {
+        final ok = await FlutterNfcKit.authenticateSector(
+          sector,
+          keyB: key,
+        );
+
+        if (ok) {
+          usedKey = key;
+          usedKeyType = 'Key B';
+          break;
+        }
+      } catch (_) {
+        // Proviamo la chiave successiva.
+      }
+    }
+
+    if (usedKey == null) {
+      return SectorResult(
+        sector: sector,
+        authenticated: false,
+        key: null,
+        keyType: null,
+        blocks: [],
+        errors: const [
+          'Nessuna chiave conosciuta accettata',
+        ],
+      );
+    }
+
+    // ------------------------------------------------------------
+    // 2. Leggiamo i 4 blocchi singolarmente
+    // ------------------------------------------------------------
+
+    final blocks = <BlockResult>[];
+    final errors = <String>[];
+
+    final firstBlock = sector * 4;
+
+    for (int offset = 0; offset < 4; offset++) {
+      final blockIndex = firstBlock + offset;
+
+      try {
+        final data = await FlutterNfcKit.readBlock(blockIndex);
+
+        blocks.add(
+          BlockResult(
+            blockIndex: blockIndex,
+            data: List<int>.from(data),
+            error: null,
+          ),
+        );
+
+        _readBlocks++;
+      } catch (e) {
+        errors.add(
+          'Blocco $blockIndex: ${_cleanError(e)}',
+        );
+
+        blocks.add(
+          BlockResult(
+            blockIndex: blockIndex,
+            data: null,
+            error: _cleanError(e),
+          ),
+        );
+      }
+
+      if (mounted) {
+        setState(() {});
+      }
+    }
+
+    return SectorResult(
+      sector: sector,
+      authenticated: true,
+      key: usedKey,
+      keyType: usedKeyType,
+      blocks: blocks,
+      errors: errors,
+    );
+  }
+
+  String _cleanError(Object error) {
+    final text = error.toString();
+
+    if (text.contains('Communication error')) {
+      return 'Errore di comunicazione NFC';
+    }
+
+    if (text.contains('Transceive failed')) {
+      return 'Transceive fallito';
+    }
+
+    return text;
+  }
+
+  // ============================================================
+  // AVVIO SCANSIONE
+  // ============================================================
+
+  Future<void> _scanTag() async {
+    if (_reading) {
+      return;
+    }
 
     setState(() {
       _reading = true;
-      _status = 'In attesa del tag NFC...';
-      _uid = '';
-      _technology = '';
-      _standard = '';
-      _ndef = '';
+      _status = 'Avvicina il tag NFC...';
+      _tag = null;
+      _sectors.clear();
       _authenticatedSectors = 0;
       _readBlocks = 0;
-      _sectors = [];
     });
 
     try {
+      final availability = await FlutterNfcKit.nfcAvailability;
+
+      if (availability != NFCAvailability.available) {
+        throw Exception(
+          'NFC non disponibile sul dispositivo',
+        );
+      }
+
       final tag = await FlutterNfcKit.poll(
-        timeout: const Duration(seconds: 30),
+        timeout: const Duration(seconds: 20),
         androidCheckNDEF: false,
+        readIso14443A: true,
+        readIso14443B: false,
+        readIso18092: false,
+        readIso15693: false,
       );
 
       if (tag.type != NFCTagType.mifare_classic) {
         setState(() {
-          _status = 'TAG NON COMPATIBILE';
-          _uid = tag.id;
-          _technology = tag.type.toString();
-          _standard = tag.standard;
-          _ndef = tag.ndefAvailable == true
-              ? 'Disponibile'
-              : 'Non disponibile';
+          _tag = tag;
+          _status =
+              'Tag rilevato, ma non è una MIFARE Classic';
         });
-
-        await FlutterNfcKit.finish(
-          iosAlertMessage: 'Tag non compatibile',
-        );
 
         return;
       }
 
       setState(() {
-        _status = 'TAG RILEVATO — analisi in corso...';
-        _uid = tag.id;
-        _technology = tag.type.toString();
-        _standard = tag.standard;
-        _ndef = tag.ndefAvailable == true
-            ? 'Disponibile'
-            : 'Non disponibile';
+        _tag = tag;
+        _status = 'MIFARE Classic rilevata';
       });
 
-      final results = <SectorResult>[];
+      // ----------------------------------------------------------
+      // Scansione dei 16 settori
+      // ----------------------------------------------------------
 
       for (int sector = 0; sector < 16; sector++) {
-        if (!mounted) return;
+        if (!mounted) {
+          return;
+        }
 
         setState(() {
-          _status = 'Analisi settore ${sector + 1} / 16...';
+          _status =
+              'Analisi settore ${sector + 1} / 16...';
         });
 
-        final result = await _readSectorWithKnownKeys(sector);
-        results.add(result);
+        final result = await _readSector(sector);
+
+        _sectors.add(result);
 
         if (result.authenticated) {
           _authenticatedSectors++;
         }
 
-        _readBlocks += result.blocks.where((b) => b.success).length;
-
         if (mounted) {
-          setState(() {
-            _sectors = List<SectorResult>.from(results);
-          });
+          setState(() {});
         }
       }
 
-      final interesting = _findInterestingSectors(results);
-
       setState(() {
-        _status = interesting.isEmpty
-            ? 'LETTURA COMPLETATA'
-            : 'LETTURA COMPLETATA — DATI INTERESSANTI TROVATI';
+        _status = 'LETTURA COMPLETATA';
       });
     } catch (e) {
       setState(() {
-        _status = 'ERRORE';
+        _status = 'Errore: ${_cleanError(e)}';
       });
-
-      _showError(e.toString());
     } finally {
       try {
         await FlutterNfcKit.finish();
@@ -218,721 +502,100 @@ class _MifareClassicPageState extends State<MifareClassicPage> {
     }
   }
 
-  Future<SectorResult> _readSectorWithKnownKeys(int sector) async {
-    String? foundKey;
-    String? foundKeyType;
-
-    /*
-     * Prima proviamo Key A, poi Key B.
-     *
-     * Non modifichiamo il tag.
-     */
-    for (final key in _knownKeys) {
-      try {
-        final ok = await FlutterNfcKit.authenticateSector(
-          sector,
-          keyA: key,
-        );
-
-        if (ok == true) {
-          foundKey = key;
-          foundKeyType = 'Key A';
-          break;
-        }
-      } catch (_) {
-        // Continuiamo con la chiave successiva.
-      }
-    }
-
-    if (foundKey == null) {
-      for (final key in _knownKeys) {
-        try {
-          final ok = await FlutterNfcKit.authenticateSector(
-            sector,
-            keyB: key,
-          );
-
-          if (ok == true) {
-            foundKey = key;
-            foundKeyType = 'Key B';
-            break;
-          }
-        } catch (_) {
-          // Continuiamo con la chiave successiva.
-        }
-      }
-    }
-
-    if (foundKey == null) {
-      return SectorResult(
-        sector: sector,
-        authenticated: false,
-        key: null,
-        keyType: null,
-        blocks: const [],
-        authenticationError: 'Nessuna chiave conosciuta accettata',
-        trailer: null,
-        accessBits: null,
-        analysis: const [],
-      );
-    }
-
-    final blocks = <BlockResult>[];
-
-    /*
-     * MIFARE Classic 1K:
-     *
-     * settore 0 -> blocchi 0,1,2,3
-     * settore 1 -> blocchi 4,5,6,7
-     * ...
-     * settore 15 -> blocchi 60,61,62,63
-     */
-    final firstBlock = sector * 4;
-
-    for (int offset = 0; offset < 3; offset++) {
-      final blockNumber = firstBlock + offset;
-
-      try {
-        final raw = await FlutterNfcKit.readBlock(blockNumber);
-        final hex = _toHex(raw);
-
-        blocks.add(
-          BlockResult(
-            block: blockNumber,
-            data: hex,
-            success: true,
-            error: null,
-            analysis: _analyzeBlock(raw),
-          ),
-        );
-      } catch (e) {
-        blocks.add(
-          BlockResult(
-            block: blockNumber,
-            data: '',
-            success: false,
-            error: e.toString(),
-            analysis: const [],
-          ),
-        );
-
-        /*
-         * Se un blocco dati fallisce, non continuiamo a martellare
-         * il tag: passiamo direttamente al settore successivo.
-         */
-        break;
-      }
-    }
-
-    /*
-     * Proviamo anche a leggere il sector trailer.
-     *
-     * Le chiavi A/B normalmente non sono restituite come dati leggibili:
-     * NXP documenta che quando vengono lette restituiscono zeri logici.
-     * Ci interessano soprattutto access bits e GPB.
-     */
-    String? trailer;
-    String? accessBits;
-
-    try {
-      final trailerBlock = firstBlock + 3;
-      final rawTrailer = await FlutterNfcKit.readBlock(trailerBlock);
-
-      trailer = _toHex(rawTrailer);
-
-      if (rawTrailer.length >= 9) {
-        final bytes = rawTrailer;
-
-        accessBits =
-            '${_byteHex(bytes[6])} '
-            '${_byteHex(bytes[7])} '
-            '${_byteHex(bytes[8])}';
-
-        blocks.add(
-          BlockResult(
-            block: trailerBlock,
-            data: trailer,
-            success: true,
-            error: null,
-            analysis: [
-              'SECTOR TRAILER',
-              'Access bits: $accessBits',
-              'GPB: ${_byteHex(bytes[9])}',
-            ],
-          ),
-        );
-      }
-    } catch (e) {
-      /*
-       * Il trailer può non essere leggibile anche quando
-       * i blocchi dati lo sono. Non consideriamo questo
-       * un errore dell'intero settore.
-       */
-    }
-
-    final analysis = <String>[];
-
-    for (final block in blocks) {
-      analysis.addAll(
-        block.analysis.map(
-          (item) => 'Blocco ${block.block}: $item',
-        ),
-      );
-    }
-
-    if (accessBits != null) {
-      analysis.add('Access bits rilevati: $accessBits');
-    }
-
-    return SectorResult(
-      sector: sector,
-      authenticated: true,
-      key: foundKey,
-      keyType: foundKeyType,
-      blocks: blocks,
-      authenticationError: null,
-      trailer: trailer,
-      accessBits: accessBits,
-      analysis: analysis,
-    );
-  }
-
-  List<String> _analyzeBlock(List<int> bytes) {
-    final result = <String>[];
-
-    if (bytes.length != 16) {
-      result.add('Lunghezza inattesa: ${bytes.length} byte');
-      return result;
-    }
-
-    /*
-     * Riconoscimento MIFARE Value Block.
-     *
-     * Struttura documentata da NXP:
-     *
-     * value
-     * ~value
-     * value
-     * address
-     * ~address
-     * address
-     * ~address
-     */
-    if (_isValueBlock(bytes)) {
-      final value = _decodeSignedLittleEndian32(bytes, 0);
-      final address = bytes[12];
-
-      result.add('POSSIBILE VALUE BLOCK');
-      result.add('Valore grezzo: $value');
-      result.add('Address: 0x${_byteHex(address)}');
-
-      return result;
-    }
-
-    /*
-     * Cerchiamo anche pattern evidenti:
-     * - tutti zero
-     * - ripetizioni
-     * - ASCII
-     */
-    if (bytes.every((b) => b == 0)) {
-      result.add('Blocco completamente a zero');
-    }
-
-    if (_hasRepeatedPattern(bytes)) {
-      result.add('Contiene pattern ripetuti');
-    }
-
-    final ascii = _extractPrintableAscii(bytes);
-
-    if (ascii.isNotEmpty) {
-      result.add('ASCII: $ascii');
-    }
-
-    return result;
-  }
-
-  bool _isValueBlock(List<int> b) {
-    if (b.length != 16) return false;
-
-    final v0 = b[0];
-    final v1 = b[1];
-    final v2 = b[2];
-    final v3 = b[3];
-
-    final n0 = b[4];
-    final n1 = b[5];
-    final n2 = b[6];
-    final n3 = b[7];
-
-    final v20 = b[8];
-    final v21 = b[9];
-    final v22 = b[10];
-    final v23 = b[11];
-
-    final address = b[12];
-    final notAddress = b[13];
-    final address2 = b[14];
-    final notAddress2 = b[15];
-
-    final valueCopyMatches =
-        v0 == v20 &&
-        v1 == v21 &&
-        v2 == v22 &&
-        v3 == v23;
-
-    final complementMatches =
-        n0 == (0xFF ^ v0) &&
-        n1 == (0xFF ^ v1) &&
-        n2 == (0xFF ^ v2) &&
-        n3 == (0xFF ^ v3);
-
-    final addressMatches =
-        notAddress == (0xFF ^ address) &&
-        address2 == address &&
-        notAddress2 == (0xFF ^ address);
-
-    return valueCopyMatches &&
-        complementMatches &&
-        addressMatches;
-  }
-
-  int _decodeSignedLittleEndian32(List<int> b, int offset) {
-    final unsigned =
-        b[offset] |
-        (b[offset + 1] << 8) |
-        (b[offset + 2] << 16) |
-        (b[offset + 3] << 24);
-
-    if ((unsigned & 0x80000000) != 0) {
-      return unsigned - 0x100000000;
-    }
-
-    return unsigned;
-  }
-
-  bool _hasRepeatedPattern(List<int> bytes) {
-    if (bytes.length < 4) return false;
-
-    for (int size = 1; size <= 4; size++) {
-      if (bytes.length % size != 0) continue;
-
-      final pattern = bytes.sublist(0, size);
-      bool matches = true;
-
-      for (int i = size; i < bytes.length; i++) {
-        if (bytes[i] != pattern[i % size]) {
-          matches = false;
-          break;
-        }
-      }
-
-      if (matches) return true;
-    }
-
-    return false;
-  }
-
-  String _extractPrintableAscii(List<int> bytes) {
-    final chars = <int>[];
-
-    for (final b in bytes) {
-      if (b >= 32 && b <= 126) {
-        chars.add(b);
-      } else {
-        chars.add(32);
-      }
-    }
-
-    final value = utf8.decode(
-      chars,
-      allowMalformed: true,
-    ).trim();
-
-    if (value.replaceAll(' ', '').length < 3) {
-      return '';
-    }
-
-    return value;
-  }
-
-  List<SectorResult> _findInterestingSectors(
-    List<SectorResult> sectors,
-  ) {
-    return sectors.where((sector) {
-      return sector.analysis.any(
-        (text) =>
-            text.contains('VALUE BLOCK') ||
-            text.contains('Valore grezzo'),
-      );
-    }).toList();
-  }
-
-  String _toHex(List<int> bytes) {
-    return bytes
-        .map(_byteHex)
-        .join(' ');
-  }
-
-  String _byteHex(int value) {
-    return value.toRadixString(16).padLeft(2, '0').toUpperCase();
-  }
-
-  void _showError(String message) {
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 5),
-      ),
-    );
-  }
-
-  Widget _infoCard(String title, String value) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 125,
-              child: Text(
-                title,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-            Expanded(
-              child: SelectableText(value),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSectorCard(SectorResult sector) {
-    final hasValueBlock = sector.analysis.any(
-      (text) => text.contains('VALUE BLOCK'),
-    );
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: ExpansionTile(
-        initiallyExpanded: sector.sector == 0 || hasValueBlock,
-        leading: Icon(
-          sector.authenticated
-              ? (hasValueBlock ? Icons.star : Icons.lock_open)
-              : Icons.lock,
-        ),
-        title: Text(
-          'Settore ${sector.sector + 1}',
-        ),
-        subtitle: sector.authenticated
-            ? Text(
-                '${sector.keyType}: ${sector.key}',
-              )
-            : const Text(
-                'AUTENTICAZIONE FALLITA',
-              ),
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              16,
-              0,
-              16,
-              16,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (sector.authenticated) ...[
-                  Text(
-                    'AUTENTICATO',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.green.shade700,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text('Metodo: ${sector.keyType}'),
-                  Text('Chiave: ${sector.key}'),
-                  if (sector.accessBits != null)
-                    Text(
-                      'Access bits: ${sector.accessBits}',
-                    ),
-                  const SizedBox(height: 12),
-                ] else ...[
-                  Text(
-                    sector.authenticationError ??
-                        'Autenticazione fallita',
-                    style: TextStyle(
-                      color: Colors.red.shade700,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                ],
-
-                for (final block in sector.blocks)
-                  _buildBlockCard(block),
-
-                if (sector.analysis.isNotEmpty) ...[
-                  const Divider(),
-                  const Text(
-                    'ANALISI',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  for (final item in sector.analysis)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Text('• $item'),
-                    ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBlockCard(BlockResult block) {
-    final interesting = block.analysis.any(
-      (x) => x.contains('VALUE BLOCK'),
-    );
-
-    return Card(
-      color: interesting
-          ? Theme.of(context).colorScheme.secondaryContainer
-          : null,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Blocco ${block.block}',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                Icon(
-                  block.success
-                      ? Icons.check_circle
-                      : Icons.error,
-                  size: 20,
-                  color: block.success
-                      ? Colors.green
-                      : Colors.red,
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (block.success)
-              SelectableText(
-                block.data,
-                style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 13,
-                ),
-              )
-            else
-              Text(
-                block.error ?? 'Errore sconosciuto',
-                style: const TextStyle(
-                  color: Colors.red,
-                ),
-              ),
-            if (block.analysis.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              for (final item in block.analysis)
-                Text(
-                  '→ $item',
-                  style: TextStyle(
-                    fontWeight: item.contains('VALUE BLOCK')
-                        ? FontWeight.bold
-                        : FontWeight.normal,
-                  ),
-                ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSummary() {
-    final interesting = _findInterestingSectors(_sectors);
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'RISULTATO',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'Settori autenticati: '
-              '$_authenticatedSectors / 16',
-            ),
-            Text(
-              'Blocchi letti: '
-              '$_readBlocks / 64',
-            ),
-            const SizedBox(height: 10),
-            if (interesting.isEmpty)
-              const Text(
-                'Nessun Value Block riconosciuto '
-                'nei blocchi accessibili.',
-              )
-            else ...[
-              Text(
-                'Settori interessanti: '
-                '${interesting.map((s) => s.sector + 1).join(', ')}',
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                'È stato riconosciuto almeno un possibile '
-                'Value Block.',
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
+  // ============================================================
+  // UI
+  // ============================================================
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Tools'),
+        title: const Text(
+          'Tools',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        centerTitle: true,
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        children: [
-                          const Icon(
-                            Icons.nfc,
-                            size: 48,
-                          ),
-                          const SizedBox(height: 8),
-                          const Text(
-                            'MIFARE Classic 1K',
-                            style: TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          const Text(
-                            'Diagnostica NFC e analisi memoria',
-                            textAlign: TextAlign.center,
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            _status,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: _status.contains('ERRORE')
-                                  ? Colors.red
-                                  : null,
-                            ),
-                          ),
-                        ],
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(
+                  16,
+                  16,
+                  16,
+                  120,
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.stretch,
+                  children: [
+                    _buildHeaderCard(),
+                    const SizedBox(height: 14),
+                    _buildStatusCard(),
+
+                    if (_tag != null) ...[
+                      const SizedBox(height: 14),
+                      _buildTagInfoCard(),
+                      const SizedBox(height: 14),
+                      _buildSummaryCard(),
+                    ],
+
+                    if (_sectors.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      const Text(
+                        'SETTORI',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
-                  ),
-
-                  if (_uid.isNotEmpty) ...[
-                    _infoCard('UID', _uid),
-                    _infoCard(
-                      'Tecnologia',
-                      _technology,
-                    ),
-                    _infoCard(
-                      'Standard',
-                      _standard,
-                    ),
-                    _infoCard(
-                      'NDEF',
-                      _ndef,
-                    ),
+                      const SizedBox(height: 8),
+                      ..._sectors.map(
+                        (sector) =>
+                            _buildSectorCard(sector),
+                      ),
+                    ],
                   ],
-
-                  if (_sectors.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    _buildSummary(),
-                    const SizedBox(height: 8),
-                    for (final sector in _sectors)
-                      _buildSectorCard(sector),
-                  ],
-
-                  const SizedBox(height: 100),
-                ],
+                ),
               ),
             ),
-          ),
 
-          SafeArea(
-            top: false,
-            child: Container(
+            // ----------------------------------------------------
+            // Pulsante fisso
+            // ----------------------------------------------------
+
+            Container(
               padding: const EdgeInsets.fromLTRB(
-                12,
-                8,
-                12,
-                12,
+                16,
+                10,
+                16,
+                16,
               ),
               decoration: BoxDecoration(
                 color: Theme.of(context)
                     .scaffoldBackgroundColor,
                 boxShadow: const [
                   BoxShadow(
-                    blurRadius: 8,
-                    offset: Offset(0, -2),
+                    blurRadius: 12,
+                    offset: Offset(0, -3),
+                    color: Color(0x22000000),
                   ),
                 ],
               ),
               child: SizedBox(
                 width: double.infinity,
-                height: 52,
-                child: FilledButton.icon(
+                height: 54,
+                child: ElevatedButton.icon(
                   onPressed:
-                      _reading ? null : _startRead,
+                      _reading ? null : _scanTag,
                   icon: Icon(
                     _reading
-                        ? Icons.hourglass_top
-                        : Icons.nfc,
+                        ? Icons.nfc
+                        : Icons.contactless,
                   ),
                   label: Text(
                     _reading
@@ -942,9 +605,500 @@ class _MifareClassicPageState extends State<MifareClassicPage> {
                 ),
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeaderCard() {
+    return Card(
+      elevation: 1,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
+          children: const [
+            Text(
+              'MIFARE Classic 1K',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 6),
+            Text(
+              'Lettura e analisi NFC',
+              style: TextStyle(
+                fontSize: 15,
+                color: Colors.black54,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatusCard() {
+    final isError = _status.startsWith('Errore');
+
+    return Card(
+      elevation: 1,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Row(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
+          children: [
+            Icon(
+              isError
+                  ? Icons.error_outline
+                  : _reading
+                      ? Icons.sync
+                      : Icons.info_outline,
+              size: 30,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment:
+                    CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'STATO',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _status,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTagInfoCard() {
+    final tag = _tag!;
+
+    return Card(
+      elevation: 1,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'INFORMAZIONI TAG',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _infoRow(
+              'UID',
+              tag.id,
+            ),
+            _infoRow(
+              'Tecnologia',
+              tag.type.toString(),
+            ),
+            _infoRow(
+              'Standard',
+              tag.standard.toString(),
+            ),
+            _infoRow(
+              'NDEF',
+              tag.ndefAvailable == true
+                  ? 'Disponibile'
+                  : 'Non disponibile',
+            ),
+            _infoRow(
+              'Dimensione NDEF',
+              '${tag.ndefCapacity}',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSummaryCard() {
+    final readablePercentage =
+        (_readBlocks / 64 * 100).round();
+
+    return Card(
+      elevation: 1,
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'RIEPILOGO',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 14),
+            _summaryRow(
+              Icons.lock_open,
+              'Settori autenticati',
+              '$_authenticatedSectors / 16',
+            ),
+            _summaryRow(
+              Icons.view_module,
+              'Blocchi letti',
+              '$_readBlocks / 64',
+            ),
+            _summaryRow(
+              Icons.analytics_outlined,
+              'Copertura',
+              '$readablePercentage%',
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _extraKeyController,
+              textCapitalization:
+                  TextCapitalization.characters,
+              decoration: const InputDecoration(
+                labelText: 'Chiave aggiuntiva',
+                hintText: 'FFFFFFFFFFFF',
+                border: OutlineInputBorder(),
+                helperText:
+                    'Inserisci solo una chiave MIFARE autorizzata da 6 byte',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _summaryRow(
+    IconData icon,
+    String label,
+    String value,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        children: [
+          Icon(icon, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(label),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ],
       ),
     );
   }
+
+  Widget _infoRow(
+    String label,
+    String value,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 125,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Colors.black54,
+              ),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectorCard(SectorResult sector) {
+    final title =
+        'Settore ${sector.sector + 1}';
+
+    if (!sector.authenticated) {
+      return Card(
+        margin: const EdgeInsets.only(bottom: 10),
+        child: ExpansionTile(
+          leading: const Icon(
+            Icons.lock_outline,
+          ),
+          title: Text(
+            title,
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          subtitle: const Text(
+            'AUTENTICAZIONE FALLITA',
+          ),
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                16,
+                0,
+                16,
+                16,
+              ),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  sector.errors.isEmpty
+                      ? 'Nessuna chiave conosciuta accettata.'
+                      : sector.errors.join('\n'),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: ExpansionTile(
+        initiallyExpanded: sector.sector == 0,
+        leading: const Icon(
+          Icons.lock_open,
+        ),
+        title: Text(
+          title,
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        subtitle: Text(
+          'AUTENTICATO • '
+          '${sector.keyType ?? ''} • '
+          '${sector.blocks.where((b) => b.data != null).length}/4 blocchi',
+        ),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              16,
+              0,
+              16,
+              16,
+            ),
+            child: Column(
+              crossAxisAlignment:
+                  CrossAxisAlignment.stretch,
+              children: [
+                _detailLine(
+                  'Metodo',
+                  sector.keyType ?? '-',
+                ),
+                _detailLine(
+                  'Chiave',
+                  sector.key ?? '-',
+                ),
+                const SizedBox(height: 8),
+
+                ...sector.blocks.map(
+                  (block) => _buildBlockCard(
+                    block,
+                  ),
+                ),
+
+                if (sector.errors.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    sector.errors.join('\n'),
+                    style: const TextStyle(
+                      color: Colors.redAccent,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _detailLine(
+    String label,
+    String value,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 80,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: Colors.black54,
+              ),
+            ),
+          ),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: const TextStyle(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBlockCard(BlockResult block) {
+    final data = block.data;
+
+    if (data == null) {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: Colors.black.withOpacity(0.04),
+        ),
+        child: Column(
+          crossAxisAlignment:
+              CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Block ${block.blockIndex}',
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              block.error ?? 'Blocco non leggibile',
+              style: const TextStyle(
+                color: Colors.redAccent,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final analysis =
+        _blockAnalysis(block.blockIndex, data);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: Colors.black.withOpacity(0.04),
+      ),
+      child: Column(
+        crossAxisAlignment:
+            CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Block ${block.blockIndex}',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 6),
+          SelectableText(
+            _hex(data),
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 13,
+            ),
+          ),
+          const SizedBox(height: 5),
+          SelectableText(
+            _hexCompact(data),
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 11,
+              color: Colors.black54,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            analysis,
+            style: const TextStyle(
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ================================================================
+// MODELLI
+// ================================================================
+
+class BlockResult {
+  final int blockIndex;
+  final List<int>? data;
+  final String? error;
+
+  const BlockResult({
+    required this.blockIndex,
+    required this.data,
+    required this.error,
+  });
+}
+
+class SectorResult {
+  final int sector;
+  final bool authenticated;
+  final String? key;
+  final String? keyType;
+  final List<BlockResult> blocks;
+  final List<String> errors;
+
+  const SectorResult({
+    required this.sector,
+    required this.authenticated,
+    required this.key,
+    required this.keyType,
+    required this.blocks,
+    required this.errors,
+  });
 }

@@ -11,8 +11,8 @@ class MifareClassicToolsApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      debugShowCheckedModeBanner: false,
       title: 'Tools',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: Colors.blue,
@@ -20,45 +20,6 @@ class MifareClassicToolsApp extends StatelessWidget {
       home: const MifareHomePage(),
     );
   }
-}
-
-class BlockData {
-  final int sector;
-  final int block;
-  final String keyType;
-  final String key;
-  final String data;
-  final String? error;
-
-  const BlockData({
-    required this.sector,
-    required this.block,
-    required this.keyType,
-    required this.key,
-    required this.data,
-    this.error,
-  });
-
-  bool get success => error == null;
-}
-
-class SectorResult {
-  final int sector;
-  final bool authenticated;
-  final String keyType;
-  final String key;
-  final List<BlockData> blocks;
-
-  const SectorResult({
-    required this.sector,
-    required this.authenticated,
-    required this.keyType,
-    required this.key,
-    required this.blocks,
-  });
-
-  int get successfulBlocks =>
-      blocks.where((block) => block.success).length;
 }
 
 class MifareHomePage extends StatefulWidget {
@@ -69,7 +30,7 @@ class MifareHomePage extends StatefulWidget {
 }
 
 class _MifareHomePageState extends State<MifareHomePage> {
-  static const List<String> _knownKeys = [
+  static const List<String> _defaultKeys = [
     'FFFFFFFFFFFF',
     'A0A1A2A3A4A5',
     'D3F7D3F7D3F7',
@@ -78,32 +39,58 @@ class _MifareHomePageState extends State<MifareHomePage> {
     '000000000000',
   ];
 
-  bool _reading = false;
+  final TextEditingController _keyController = TextEditingController();
+
   String _status = 'PRONTO';
-  String? _uid;
-  NFCTag? _tag;
+  String _uid = '';
+  String _technology = '';
+  String _standard = '';
+  String _ndef = '';
 
-  final List<SectorResult> _sectors = [];
+  bool _reading = false;
 
-  int get _authenticatedSectors =>
-      _sectors.where((sector) => sector.authenticated).length;
+  int _authenticatedSectors = 0;
+  int _readBlocks = 0;
 
-  int get _readBlocks =>
-      _sectors.fold(0, (sum, sector) => sum + sector.successfulBlocks);
+  final Map<int, List<String>> _sectorLines = {};
 
-  int get _totalBlocks => 64;
+  @override
+  void dispose() {
+    _keyController.dispose();
+    super.dispose();
+  }
 
-  Future<void> _readTag() async {
-    if (_reading) {
-      return;
+  List<String> get _keys {
+    final keys = <String>[..._defaultKeys];
+
+    final custom = _keyController.text
+        .trim()
+        .replaceAll(' ', '')
+        .replaceAll(':', '')
+        .toUpperCase();
+
+    if (custom.length == 12 && RegExp(r'^[0-9A-F]{12}$').hasMatch(custom)) {
+      if (!keys.contains(custom)) {
+        keys.insert(0, custom);
+      }
     }
+
+    return keys;
+  }
+
+  Future<void> _startRead() async {
+    if (_reading) return;
 
     setState(() {
       _reading = true;
-      _status = 'RICERCA TAG...';
-      _uid = null;
-      _tag = null;
-      _sectors.clear();
+      _status = 'ATTESA TAG NFC...';
+      _uid = '';
+      _technology = '';
+      _standard = '';
+      _ndef = '';
+      _authenticatedSectors = 0;
+      _readBlocks = 0;
+      _sectorLines.clear();
     });
 
     try {
@@ -112,20 +99,33 @@ class _MifareHomePageState extends State<MifareHomePage> {
         androidCheckNDEF: false,
       );
 
-      _tag = tag;
-      _uid = tag.id;
+      if (!mounted) return;
 
       setState(() {
+        _uid = tag.id;
+        _technology = tag.type.toString();
+        _standard = tag.standard;
+        _ndef = tag.ndefAvailable == true ? 'Disponibile' : 'Non disponibile';
         _status = 'TAG RILEVATO';
       });
 
-      await _scanTag();
-    } catch (e) {
-      setState(() {
-        _status = 'ERRORE';
-      });
+      if (tag.type != NFCTagType.mifare_classic) {
+        if (mounted) {
+          setState(() {
+            _status = 'TAG NON MIFARE CLASSIC';
+          });
+        }
+        return;
+      }
 
-      _showMessage('Errore durante la lettura:\n$e');
+      await _readMifareClassic();
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = 'ERRORE';
+          _sectorLines[-1] = ['${e.runtimeType}: $e'];
+        });
+      }
     } finally {
       try {
         await FlutterNfcKit.finish();
@@ -139,77 +139,103 @@ class _MifareHomePageState extends State<MifareHomePage> {
     }
   }
 
-  Future<void> _scanTag() async {
-    final List<SectorResult> results = [];
-
+  Future<void> _readMifareClassic() async {
     for (int sector = 0; sector < 16; sector++) {
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
 
-      setState(() {
-        _status = 'SCANSIONE SETTORE ${sector + 1} / 16...';
-      });
+      final lines = <String>[];
 
-      SectorResult? result;
+      bool authenticated = false;
+      String? authMethod;
+      String? usedKey;
 
-      // Prima proviamo tutte le chiavi come Key A.
-      for (final key in _knownKeys) {
+      for (final key in _keys) {
         try {
-          final authenticated = await FlutterNfcKit.authenticateSector(
+          final result = await FlutterNfcKit.authenticateSector(
             sector,
             keyA: key,
           );
 
-          if (authenticated) {
-            result = await _readSectorBlocks(
-              sector: sector,
-              keyType: 'Key A',
-              key: key,
-            );
+          if (result) {
+            authenticated = true;
+            authMethod = 'Key A';
+            usedKey = key;
+            break;
+          }
+        } catch (_) {}
+
+        try {
+          final result = await FlutterNfcKit.authenticateSector(
+            sector,
+            keyB: key,
+          );
+
+          if (result) {
+            authenticated = true;
+            authMethod = 'Key B';
+            usedKey = key;
             break;
           }
         } catch (_) {}
       }
 
-      // Se Key A non funziona, proviamo Key B.
-      if (result == null) {
-        for (final key in _knownKeys) {
-          try {
-            final authenticated = await FlutterNfcKit.authenticateSector(
-              sector,
-              keyB: key,
-            );
+      if (!authenticated) {
+        lines.add('AUTENTICAZIONE FALLITA');
+        _sectorLines[sector] = lines;
 
-            if (authenticated) {
-              result = await _readSectorBlocks(
-                sector: sector,
-                keyType: 'Key B',
-                key: key,
-              );
-              break;
-            }
-          } catch (_) {}
+        if (mounted) {
+          setState(() {});
+        }
+
+        continue;
+      }
+
+      _authenticatedSectors++;
+
+      lines.add('AUTENTICATO');
+      lines.add('Metodo: $authMethod');
+      lines.add('Chiave: $usedKey');
+
+      bool sectorOk = true;
+
+      for (int block = sector * 4; block < sector * 4 + 4; block++) {
+        try {
+          final data = await FlutterNfcKit.readBlock(block);
+
+          final hex = data
+              .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+              .join(' ');
+
+          lines.add('Block $block:');
+          lines.add(hex);
+
+          _readBlocks++;
+        } catch (e) {
+          sectorOk = false;
+          lines.add('Block $block: ERRORE');
+          lines.add('${e.runtimeType}: $e');
+          break;
         }
       }
 
-      // Nessuna chiave conosciuta ha funzionato.
-      result ??= SectorResult(
-        sector: sector,
-        authenticated: false,
-        keyType: '-',
-        key: '-',
-        blocks: const [],
-      );
+      if (sector == 2) {
+        lines.add('');
+        lines.add('*** SETTORE 2 - DATI DI INTERESSE ***');
+      }
 
-      results.add(result);
+      if (sector == 3) {
+        lines.add('');
+        lines.add('*** SETTORE 3 - DATI DI INTERESSE ***');
+      }
+
+      if (!sectorOk) {
+        lines.add('Lettura settore interrotta al primo errore.');
+      }
+
+      _sectorLines[sector] = lines;
 
       if (mounted) {
-        setState(() {
-          _sectors
-            ..clear()
-            ..addAll(results);
-        });
+        setState(() {});
       }
     }
 
@@ -220,187 +246,107 @@ class _MifareHomePageState extends State<MifareHomePage> {
     }
   }
 
-  Future<SectorResult> _readSectorBlocks({
-    required int sector,
-    required String keyType,
-    required String key,
-  }) async {
-    final List<BlockData> blocks = [];
-
-    final int firstBlock = sector * 4;
-    final int lastBlock = firstBlock + 3;
-
-    for (int block = firstBlock; block <= lastBlock; block++) {
-      try {
-        final data = await FlutterNfcKit.readBlock(block);
-
-        blocks.add(
-          BlockData(
-            sector: sector,
-            block: block,
-            keyType: keyType,
-            key: key,
-            data: _formatBytes(data),
-          ),
-        );
-      } catch (e) {
-        blocks.add(
-          BlockData(
-            sector: sector,
-            block: block,
-            keyType: keyType,
-            key: key,
-            data: '',
-            error: e.toString(),
-          ),
-        );
-      }
-    }
-
-    return SectorResult(
-      sector: sector,
-      authenticated: true,
-      keyType: keyType,
-      key: key,
-      blocks: blocks,
-    );
-  }
-
-  String _formatBytes(dynamic data) {
-    if (data is List<int>) {
-      return data
-          .map((byte) => byte.toRadixString(16).padLeft(2, '0').toUpperCase())
-          .join(' ');
-    }
-
-    if (data is String) {
-      return data;
-    }
-
-    return data.toString();
-  }
-
-  void _showMessage(String message) {
-    if (!mounted) {
-      return;
-    }
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(seconds: 5),
-      ),
-    );
-  }
-
-  Widget _infoRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 145,
-            child: Text(
-              label,
-              style: const TextStyle(
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-          Expanded(
-            child: SelectableText(value),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBlock(BlockData block) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        border: Border.all(
-          color: block.success
-              ? Colors.green.withValues(alpha: 0.4)
-              : Colors.red.withValues(alpha: 0.4),
-        ),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Block ${block.block}',
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 4),
-          if (block.success)
-            SelectableText(
-              block.data,
-              style: const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 13,
-              ),
-            )
-          else
-            SelectableText(
-              'ERRORE: ${block.error}',
-              style: const TextStyle(
-                color: Colors.red,
-                fontSize: 12,
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSector(SectorResult sector) {
-    final readable = sector.successfulBlocks;
-
+  Widget _infoCard() {
     return Card(
-      margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'SETTORE ${sector.sector + 1}',
+              _status,
               style: const TextStyle(
-                fontSize: 18,
+                fontSize: 20,
                 fontWeight: FontWeight.bold,
               ),
             ),
-            const SizedBox(height: 6),
-            _infoRow(
-              'Stato',
-              sector.authenticated
-                  ? 'AUTENTICATO'
-                  : 'AUTENTICAZIONE FALLITA',
-            ),
-            if (sector.authenticated) ...[
-              _infoRow('Metodo', sector.keyType),
-              _infoRow('Chiave', sector.key),
-              _infoRow('Blocchi letti', '$readable / 4'),
-              const SizedBox(height: 4),
-              ...sector.blocks.map(_buildBlock),
-            ],
+            const SizedBox(height: 12),
+            if (_uid.isNotEmpty) Text('UID: $_uid'),
+            if (_technology.isNotEmpty)
+              Text('Tecnologia: $_technology'),
+            if (_standard.isNotEmpty) Text('Standard: $_standard'),
+            if (_ndef.isNotEmpty) Text('NDEF: $_ndef'),
+            const SizedBox(height: 10),
+            Text('Settori autenticati: $_authenticatedSectors / 16'),
+            Text('Blocchi letti: $_readBlocks / 64'),
           ],
         ),
       ),
     );
   }
 
+  Widget _keyCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'CHIAVE AGGIUNTIVA',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Inserisci una chiave MIFARE Classic di 6 byte '
+              '(12 caratteri HEX), se ne possiedi una autorizzata.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _keyController,
+              enabled: !_reading,
+              maxLength: 12,
+              textCapitalization: TextCapitalization.characters,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Esempio: FFFFFFFFFFFF',
+                counterText: '',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _sectorCard(int sector, List<String> lines) {
+    final important = sector == 2 || sector == 3;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      child: ExpansionTile(
+        initiallyExpanded: important,
+        title: Text(
+          'Settore ${sector + 1}',
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: important ? Colors.blue : null,
+          ),
+        ),
+        subtitle: Text(
+          important ? 'SETTORE DI INTERESSE' : 'MIFARE Classic',
+        ),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SelectableText(
+              lines.join('\n'),
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final tag = _tag;
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Tools'),
@@ -408,116 +354,58 @@ class _MifareHomePageState extends State<MifareHomePage> {
       body: Column(
         children: [
           Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const Text(
-                    'MIFARE Classic 1K',
-                    style: TextStyle(
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold,
-                    ),
+            child: ListView(
+              padding: const EdgeInsets.all(12),
+              children: [
+                const Text(
+                  'MIFARE Classic 1K',
+                  style: TextStyle(
+                    fontSize: 26,
+                    fontWeight: FontWeight.bold,
                   ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    'Lettura e strumenti NFC',
-                    style: TextStyle(
-                      fontSize: 16,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Lettura e analisi NFC',
+                  style: TextStyle(fontSize: 16),
+                ),
+                const SizedBox(height: 12),
+                _infoCard(),
+                const SizedBox(height: 8),
+                _keyCard(),
+                const SizedBox(height: 8),
+                for (final entry in _sectorLines.entries)
+                  if (entry.key >= 0)
+                    _sectorCard(entry.key, entry.value),
+                if (_sectorLines.containsKey(-1))
                   Card(
                     child: Padding(
-                      padding: const EdgeInsets.all(14),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _status,
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: _status == 'ERRORE'
-                                  ? Colors.red
-                                  : Colors.blue,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-
-                          if (tag != null) ...[
-                            _infoRow(
-                              'UID',
-                              tag.id,
-                            ),
-                            _infoRow(
-                              'Tecnologia',
-                              tag.type.toString(),
-                            ),
-                            _infoRow(
-                              'Standard',
-                              tag.standard.toString(),
-                            ),
-                            _infoRow(
-                              'NDEF',
-                              tag.ndefAvailable == true
-                                  ? 'Disponibile'
-                                  : 'Non disponibile',
-                            ),
-                          ],
-
-                          if (_sectors.isNotEmpty) ...[
-                            const Divider(height: 24),
-                            _infoRow(
-                              'Settori autenticati',
-                              '$_authenticatedSectors / 16',
-                            ),
-                            _infoRow(
-                              'Blocchi letti',
-                              '$_readBlocks / $_totalBlocks',
-                            ),
-                          ],
-                        ],
+                      padding: const EdgeInsets.all(16),
+                      child: SelectableText(
+                        _sectorLines[-1]!.join('\n'),
                       ),
                     ),
                   ),
-
-                  const SizedBox(height: 16),
-
-                  if (_sectors.isNotEmpty)
-                    ..._sectors.map(_buildSector),
-
-                  if (_sectors.isEmpty && !_reading)
-                    const Card(
-                      child: Padding(
-                        padding: EdgeInsets.all(20),
-                        child: Text(
-                          'Premi il pulsante qui sotto per cercare '
-                          'un tag MIFARE Classic 1K.',
-                          textAlign: TextAlign.center,
-                        ),
-                      ),
-                    ),
-
-                  const SizedBox(height: 20),
-                ],
-              ),
+                const SizedBox(height: 90),
+              ],
             ),
           ),
-
           SafeArea(
             top: false,
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
               child: SizedBox(
                 width: double.infinity,
-                height: 52,
-                child: FilledButton(
-                  onPressed: _reading ? null : _readTag,
-                  child: Text(
-                    _reading ? 'LETTURA IN CORSO...' : 'CERCA TAG NFC',
+                height: 54,
+                child: FilledButton.icon(
+                  onPressed: _reading ? null : _startRead,
+                  icon: Icon(
+                    _reading
+                        ? Icons.hourglass_top
+                        : Icons.contactless,
+                  ),
+                  label: Text(
+                    _reading ? 'ATTESA TAG...' : 'CERCA TAG NFC',
                   ),
                 ),
               ),

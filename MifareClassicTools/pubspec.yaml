@@ -1,0 +1,22 @@
+name: mifare_classic_tools
+description: MIFARE Classic NFC reader and authorized key verification tool
+publish_to: "none"
+version: 1.0.0+2
+
+environment:
+  sdk: ">=3.9.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_nfc_kit: ^3.6.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/keys/authorized.keys

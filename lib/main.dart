@@ -1,3 +1,5 @@
+
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_nfc_kit/flutter_nfc_kit.dart';
@@ -12,442 +14,274 @@ class MifareClassicToolsApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'MIFARE Classic Tools',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.indigo,
-      ),
-      home: const HomePage(),
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
+      home: const ScannerPage(),
     );
   }
 }
 
-class FoundKey {
-  const FoundKey({
-    required this.sector,
-    required this.type,
-    required this.key,
-  });
+class ScannerPage extends StatefulWidget {
+  const ScannerPage({super.key});
 
-  final int sector;
-  final String type;
-  final String key;
-
-  String get storageValue => '$sector|$type|$key';
-
-  static FoundKey? fromStorage(String value) {
-    final parts = value.split('|');
-    if (parts.length != 3) return null;
-    final sector = int.tryParse(parts[0]);
-    if (sector == null || (parts[1] != 'A' && parts[1] != 'B')) return null;
-    return FoundKey(sector: sector, type: parts[1], key: parts[2]);
-  }
+  @override
+  State<ScannerPage> createState() => _ScannerPageState();
 }
 
-class _HomePageState extends State<HomePage> {
-  NFCTag? _tag;
-  bool _sessionOpen = false;
-  bool _busy = false;
-  bool _cancelRequested = false;
+class _ScannerPageState extends State<ScannerPage> {
+  static const _prefsKey = 'mifare_found_keys_v1';
 
-  List<String> _candidateKeys = <String>[];
-  final List<FoundKey> _foundKeys = <FoundKey>[];
-
-  String _status = 'Pronto. Carico il database chiavi...';
+  bool _running = false;
+  bool _stopRequested = false;
+  List<String> _keys = [];
+  final List<_FoundKey> _found = [];
   int _attempts = 0;
   int _totalAttempts = 0;
-  int _currentSector = 0;
-  String _currentKey = '';
+  String _status = 'Pronto. Premi "Scansiona tag".';
 
   @override
   void initState() {
     super.initState();
-    _loadCandidates();
-    _loadSavedResults();
+    _loadKeys();
   }
 
-  Future<void> _loadCandidates() async {
+  Future<void> _loadKeys() async {
     try {
       final text = await rootBundle.loadString('assets/keys/authorized.keys');
       final keys = <String>{};
-
       for (final raw in text.split(RegExp(r'\r?\n'))) {
-        var line = raw.trim();
-        if (line.isEmpty || line.startsWith('#')) continue;
-        line = line.replaceAll(RegExp(r'[\s:\-]'), '').toUpperCase();
-        if (RegExp(r'^[0-9A-F]{12}$').hasMatch(line)) {
-          keys.add(line);
+        final k = raw.trim().replaceAll(RegExp(r'\s+'), '').toUpperCase();
+        if (RegExp(r'^[0-9A-F]{12}$').hasMatch(k)) {
+          keys.add(k);
+        }
+      }
+      final saved = await _loadSaved();
+      // Saved keys go first; then all candidate keys.
+      final ordered = <String>[...saved.map((e) => e.key)];
+      for (final k in keys) {
+        if (!ordered.contains(k)) ordered.add(k);
+      }
+      if (mounted) {
+        setState(() {
+          _keys = ordered;
+          _status = 'Caricate ${keys.length} chiavi candidate.';
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _status = 'Errore caricamento chiavi: $e');
+    }
+  }
+
+  Future<List<_FoundKey>> _loadSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList(_prefsKey) ?? const [];
+    return raw.map((s) {
+      final p = s.split('|');
+      if (p.length != 4) return _FoundKey('', -1, '', '');
+      return _FoundKey(p[0], int.tryParse(p[1]) ?? -1, p[2], p[3]);
+    }).where((e) => e.key.isNotEmpty && e.sector >= 0).toList();
+  }
+
+  Future<void> _saveFound(String uid) async {
+    final prefs = await SharedPreferences.getInstance();
+    final existing = prefs.getStringList(_prefsKey) ?? <String>[];
+    final map = <String, String>{};
+    for (final item in existing) {
+      final p = item.split('|');
+      if (p.length == 4) map['${p[0]}|${p[1]}|${p[2]}'] = item;
+    }
+    for (final f in _found) {
+      map['$uid|${f.sector}|${f.type}'] = '$uid|${f.sector}|${f.type}|${f.key}';
+    }
+    await prefs.setStringList(_prefsKey, map.values.toList());
+  }
+
+  Future<void> _scan() async {
+    if (_running) return;
+    setState(() {
+      _running = true;
+      _stopRequested = false;
+      _found.clear();
+      _attempts = 0;
+      _status = 'Controllo NFC...';
+    });
+
+    try {
+      final availability = await FlutterNfcKit.nfcAvailability;
+      if (availability != NFCAvailability.available) {
+        throw StateError('NFC non disponibile o disabilitato.');
+      }
+
+      setState(() => _status = 'Avvicina il MIFARE Classic al telefono...');
+      final tag = await FlutterNfcKit.poll(
+        timeout: const Duration(seconds: 30),
+        androidPlatformSound: false,
+        androidCheckNDEF: false,
+      );
+
+      if (tag.type != NFCTagType.mifare_classic) {
+        throw StateError('Tag rilevato: ${tag.type.name}. Serve un MIFARE Classic.');
+      }
+
+      final uid = tag.id.toUpperCase();
+      final sectors = _sectorCount(tag);
+      final savedForTag = (await _loadSaved())
+          .where((e) => e.uid == uid && e.sector < sectors)
+          .toList();
+
+      _totalAttempts = sectors * _keys.length * 2;
+      setState(() {
+        _status = 'UID $uid — $sectors settori — ${_keys.length} chiavi candidate.';
+      });
+
+      for (var sector = 0; sector < sectors && !_stopRequested; sector++) {
+        final known = savedForTag.where((e) => e.sector == sector).toList();
+        var sectorFound = false;
+
+        // Prima prova le chiavi già memorizzate per questo UID/settore.
+        for (final saved in known) {
+          if (_stopRequested) break;
+          final ok = await _authenticate(sector, saved.type, saved.key);
+          _attempts++;
+          if (ok) {
+            _found.add(saved);
+            sectorFound = true;
+            setState(() => _status =
+                'Settore $sector: ${saved.type} ${saved.key} (memorizzata)');
+            break;
+          }
+        }
+        if (sectorFound) continue;
+
+        // Poi prova tutte le candidate, una alla volta, prima A e poi B.
+        for (final key in _keys) {
+          if (_stopRequested || sectorFound) break;
+
+          final a = await _authenticate(sector, 'A', key);
+          _attempts++;
+          if (a) {
+            final f = _FoundKey(uid, sector, 'A', key);
+            _found.add(f);
+            await _saveFound(uid);
+            sectorFound = true;
+            setState(() => _status = 'Trovata Key A: settore $sector → $key');
+            break;
+          }
+
+          final b = await _authenticate(sector, 'B', key);
+          _attempts++;
+          if (b) {
+            final f = _FoundKey(uid, sector, 'B', key);
+            _found.add(f);
+            await _saveFound(uid);
+            sectorFound = true;
+            setState(() => _status = 'Trovata Key B: settore $sector → $key');
+            break;
+          }
+
+          if (_attempts % 10 == 0 && mounted) {
+            setState(() => _status =
+                'Settore $sector — tentativi $_attempts / $_totalAttempts');
+          }
+        }
+
+        if (!sectorFound && mounted) {
+          setState(() => _status = 'Settore $sector: nessuna chiave trovata.');
         }
       }
 
-      final list = keys.toList()..sort();
-      if (!mounted) return;
-
-      setState(() {
-        _candidateKeys = list;
-        _status = 'Pronto: ${list.length} chiavi candidate caricate.';
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _status = 'Errore caricamento chiavi: $e');
-    }
-  }
-
-  Future<void> _loadSavedResults() async {
-    final prefs = await SharedPreferences.getInstance();
-    final values = prefs.getStringList('found_keys') ?? <String>[];
-    final restored = values
-        .map(FoundKey.fromStorage)
-        .whereType<FoundKey>()
-        .toList();
-
-    if (!mounted) return;
-    setState(() {
-      _foundKeys
-        ..clear()
-        ..addAll(restored);
-    });
-  }
-
-  Future<void> _saveResults() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      'found_keys',
-      _foundKeys.map((e) => e.storageValue).toList(),
-    );
-  }
-
-  Future<void> _poll() async {
-    if (_busy) return;
-
-    setState(() {
-      _busy = true;
-      _status = 'Avvicina il tag MIFARE Classic al telefono...';
-    });
-
-    try {
-      if (_sessionOpen) {
-        await FlutterNfcKit.finish();
-        _sessionOpen = false;
+      if (_stopRequested) {
+        setState(() => _status = 'Scansione interrotta. Trovate ${_found.length} chiavi.');
+      } else {
+        setState(() => _status = 'Scansione terminata. Trovate ${_found.length} chiavi.');
       }
-
-      final tag = await FlutterNfcKit.poll(
-        timeout: const Duration(seconds: 20),
-        androidReaderModeFlags: 0x80,
-      );
-
-      _tag = tag;
-      _sessionOpen = true;
-
-      if (tag.type != NFCTagType.mifare_classic) {
-        setState(() {
-          _status = 'Tag rilevato, ma non è MIFARE Classic: ${tag.type}';
-        });
-        return;
-      }
-
-      setState(() {
-        _status =
-            'MIFARE Classic rilevato — ID ${tag.id}. Pronto per la verifica.';
-      });
     } catch (e) {
-      setState(() => _status = 'Errore NFC: $e');
+      if (mounted) setState(() => _status = 'Errore: $e');
     } finally {
-      if (mounted) setState(() => _busy = false);
+      try {
+        await FlutterNfcKit.finish();
+      } catch (_) {}
+      if (mounted) setState(() => _running = false);
     }
   }
 
-  int _sectorCountForTag(NFCTag tag) {
-    // I valori SAK usati comunemente da MIFARE Classic:
-    // 09 = Mini (5 settori), 08/28/88 = 1K (16), 18/38 = 4K (40).
-    final sak = (tag.sak ?? '')
-        .replaceAll(RegExp(r'[^0-9A-Fa-f]'), '')
-        .toUpperCase();
-    if (sak == '09') return 5;
-    if (sak == '18' || sak == '38') return 40;
-    return 16;
-  }
-
-  bool _alreadyFound(int sector, String type, String key) {
-    return _foundKeys.any(
-      (f) => f.sector == sector && f.type == type && f.key == key,
-    );
-  }
-
-  Future<bool> _tryKey(int sector, String type, String key) async {
+  Future<bool> _authenticate(int sector, String type, String key) async {
     try {
       if (type == 'A') {
-        return await FlutterNfcKit.authenticateSector(
-          sector,
-          keyA: key,
-        );
+        return await FlutterNfcKit.authenticateSector<String>(sector, keyA: key);
       }
-      return await FlutterNfcKit.authenticateSector(
-        sector,
-        keyB: key,
-      );
+      return await FlutterNfcKit.authenticateSector<String>(sector, keyB: key);
     } catch (_) {
       return false;
     }
   }
 
-  Future<void> _addFoundKey(int sector, String type, String key) async {
-    if (_alreadyFound(sector, type, key)) return;
-
-    _foundKeys.add(FoundKey(sector: sector, type: type, key: key));
-    await _saveResults();
-
-    if (mounted) setState(() {});
-  }
-
-  Future<void> _runAutomaticScan() async {
-    if (_busy) return;
-
-    if (!_sessionOpen || _tag == null) {
-      setState(() => _status = 'Prima premi "Rileva tag".');
-      return;
-    }
-
-    if (_tag!.type != NFCTagType.mifare_classic) {
-      setState(() => _status = 'Il tag rilevato non è MIFARE Classic.');
-      return;
-    }
-
-    if (_candidateKeys.isEmpty) {
-      setState(() => _status = 'Nessuna chiave valida caricata.');
-      return;
-    }
-
-    final sectors = _sectorCountForTag(_tag!);
-    _cancelRequested = false;
-    _attempts = 0;
-    _totalAttempts = sectors * _candidateKeys.length * 2;
-
-    setState(() {
-      _busy = true;
-      _status =
-          'Avvio verifica automatica: $sectors settori × '
-          '${_candidateKeys.length} chiavi × Key A/B.';
-    });
-
-    try {
-      // Prima le Key A, poi le Key B. Non vengono effettuate scritture.
-      for (final type in const ['A', 'B']) {
-        for (var sector = 0; sector < sectors; sector++) {
-          if (_cancelRequested) break;
-
-          _currentSector = sector;
-
-          // Se per un settore abbiamo già una chiave di questo tipo,
-          // lo consideriamo risolto e passiamo oltre.
-          if (_foundKeys.any((f) => f.sector == sector && f.type == type)) {
-            continue;
-          }
-
-          var foundForSector = false;
-
-          for (final key in _candidateKeys) {
-            if (_cancelRequested) break;
-
-            _currentKey = key;
-            _attempts++;
-
-            if (mounted) {
-              setState(() {
-                _status =
-                    'Settore $sector/$sectors — Key $type — '
-                    'tentativo $_attempts/$_totalAttempts — $key';
-              });
-            }
-
-            final ok = await _tryKey(sector, type, key);
-
-            if (ok) {
-              foundForSector = true;
-              await _addFoundKey(sector, type, key);
-
-              if (mounted) {
-                setState(() {
-                  _status =
-                      'TROVATA: settore $sector — Key $type — $key';
-                });
-              }
-
-              // Per questo tipo di chiave, una volta trovata la prima
-              // candidata valida per il settore, passiamo al settore successivo.
-              break;
-            }
-
-            // Piccola pausa per non martellare il thread NFC del telefono.
-            await Future<void>.delayed(const Duration(milliseconds: 10));
-          }
-
-          if (!foundForSector && mounted && !_cancelRequested) {
-            setState(() {
-              _status =
-                  'Settore $sector — nessuna chiave $type trovata '
-                  'nella lista.';
-            });
-          }
-        }
-
-        if (_cancelRequested) break;
-      }
-
-      if (mounted) {
-        setState(() {
-          _status = _cancelRequested
-              ? 'Scansione interrotta dall\'utente.'
-              : 'Scansione terminata. Trovate ${_foundKeys.length} associazioni.';
-        });
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  Future<void> _clearSavedResults() async {
-    if (_busy) return;
-
-    _foundKeys.clear();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('found_keys');
-
-    if (mounted) {
-      setState(() {
-        _status = 'Risultati salvati cancellati.';
-      });
-    }
-  }
-
-  Future<void> _finish() async {
-    try {
-      if (_sessionOpen) await FlutterNfcKit.finish();
-    } catch (_) {
-      // La sessione può essere già terminata dal sistema.
-    } finally {
-      _sessionOpen = false;
-      _tag = null;
-      if (mounted) {
-        setState(() {
-          _status = 'Sessione NFC chiusa.';
-        });
-      }
-    }
+  int _sectorCount(NFCTag tag) {
+    final sak = (tag.sak ?? '').replaceAll('0x', '').toUpperCase();
+    // Classic 4K normally reports SAK 0x18. Classic 2K/1K variants
+    // can report 0x08/0x09/0x18 depending on card.
+    if (sak == '18') return 40;
+    return 16;
   }
 
   @override
   Widget build(BuildContext context) {
-    final tag = _tag;
-    final double progress = _totalAttempts == 0
-        ? 0.0
-        : (_attempts / _totalAttempts).clamp(0.0, 1.0).toDouble();
-
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('MIFARE Classic Tools'),
-      ),
-      body: ListView(
+      appBar: AppBar(title: const Text('MIFARE Classic Tools')),
+      body: Padding(
         padding: const EdgeInsets.all(16),
-        children: [
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    'Stato',
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(_status),
-                  if (tag != null) ...[
-                    const SizedBox(height: 8),
-                    Text('Tipo: ${tag.type}'),
-                    Text('ID: ${tag.id}'),
-                    Text('Standard: ${tag.standard}'),
-                    Text('SAK: ${tag.sak ?? "n/d"}'),
-                    Text('Chiavi candidate: ${_candidateKeys.length}'),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          FilledButton.icon(
-            onPressed: _busy ? null : _poll,
-            icon: const Icon(Icons.nfc),
-            label: const Text('1. Rileva tag'),
-          ),
-          const SizedBox(height: 8),
-          FilledButton.icon(
-            onPressed: _busy || !_sessionOpen ? null : _runAutomaticScan,
-            icon: const Icon(Icons.manage_search),
-            label: const Text('2. Prova automaticamente le chiavi'),
-          ),
-          if (_busy) ...[
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(_status),
             const SizedBox(height: 12),
-            LinearProgressIndicator(value: progress),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: () => setState(() => _cancelRequested = true),
-              icon: const Icon(Icons.stop),
-              label: const Text('Interrompi scansione'),
-            ),
-          ],
-          const SizedBox(height: 8),
-          OutlinedButton(
-            onPressed: _busy ? null : _finish,
-            child: const Text('Chiudi sessione NFC'),
-          ),
-          const Divider(height: 32),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Chiavi trovate e salvate',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
+            if (_running)
+              LinearProgressIndicator(
+                value: _totalAttempts == 0
+                    ? null
+                    : (_attempts / _totalAttempts).clamp(0.0, 1.0),
               ),
-              IconButton(
-                tooltip: 'Cancella risultati salvati',
-                onPressed: _busy ? null : _clearSavedResults,
-                icon: const Icon(Icons.delete_outline),
+            const SizedBox(height: 12),
+            Text('Chiavi candidate: ${_keys.length}'),
+            Text('Chiavi trovate in questa scansione: ${_found.length}'),
+            Text('Tentativi: $_attempts${_totalAttempts == 0 ? '' : ' / $_totalAttempts'}'),
+            const SizedBox(height: 20),
+            FilledButton(
+              onPressed: _running ? null : _scan,
+              child: const Text('Scansiona tag'),
+            ),
+            if (_running) ...[
+              const SizedBox(height: 8),
+              OutlinedButton(
+                onPressed: () => setState(() => _stopRequested = true),
+                child: const Text('Interrompi'),
               ),
             ],
-          ),
-          const SizedBox(height: 8),
-          if (_foundKeys.isEmpty)
-            const Text('Nessuna associazione salvata.')
-          else
-            ..._foundKeys.map(
-              (found) => Card(
-                child: ListTile(
-                  leading: const Icon(Icons.key),
-                  title: Text(
-                    'Settore ${found.sector} — Key ${found.type}',
-                  ),
-                  subtitle: Text(found.key),
-                ),
+            const SizedBox(height: 20),
+            Expanded(
+              child: ListView.builder(
+                itemCount: _found.length,
+                itemBuilder: (context, index) {
+                  final f = _found[index];
+                  return ListTile(
+                    dense: true,
+                    title: Text('Settore ${f.sector} — Key ${f.type}'),
+                    subtitle: Text(f.key),
+                  );
+                },
               ),
             ),
-          const SizedBox(height: 20),
-          const Text(
-            'La procedura usa solo autenticazione in lettura: non scrive '
-            'dati sul tag. Le associazioni trovate vengono salvate '
-            'localmente sul telefono.',
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
-class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+class _FoundKey {
+  final String uid;
+  final int sector;
+  final String type;
+  final String key;
 
-  @override
-  State<HomePage> createState() => _HomePageState();
+  const _FoundKey(this.uid, this.sector, this.type, this.key);
 }

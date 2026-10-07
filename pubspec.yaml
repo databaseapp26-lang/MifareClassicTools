@@ -1,5 +1,5 @@
 name: mifare_classic_tools
-description: MIFARE Classic 1K reader and tools.
+description: MIFARE Classic 1K reader and analysis tools
 publish_to: "none"
 
 version: 1.0.0+1
@@ -19,3 +19,6 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    - assets/keys/

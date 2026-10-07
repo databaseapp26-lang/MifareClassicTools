@@ -41,18 +41,26 @@ class _HomePageState extends State<HomePage> {
   // ============================================================
 
   static const List<String> _knownKeys = [
+    // Chiavi MIFARE Classic comuni
     'FFFFFFFFFFFF',
     '000000000000',
     'A0A1A2A3A4A5',
     'B0B1B2B3B4B5',
     'D3F7D3F7D3F7',
     '4D3A99C351DD',
+
+    // Chiavi già utilizzate/testate
     'A0B0C0D0E0F0',
     'A1B1C1D1E1F1',
     'AABBCCDDEEFF',
     '714C5C886E97',
     '587EE5F9350F',
     '1A982C7E459A',
+
+    // Altre chiavi pubbliche/comuni
+    'A0478CC39091',
+    '533CB6C723F6',
+    '8FD0A4F256E9',
   ];
 
   final TextEditingController _extraKeyController =
@@ -210,7 +218,6 @@ class _HomePageState extends State<HomePage> {
       (b7 >> 1) & 1,
     ];
 
-    // Controllo semplice di coerenza delle coppie complementari.
     final valid =
         (((b6 ^ b7) & 0x0F) == 0x0F) &&
         (((b7 ^ b8) & 0xF0) == 0xF0);
@@ -536,14 +543,12 @@ class _HomePageState extends State<HomePage> {
                     _buildHeaderCard(),
                     const SizedBox(height: 14),
                     _buildStatusCard(),
-
                     if (_tag != null) ...[
                       const SizedBox(height: 14),
                       _buildTagInfoCard(),
                       const SizedBox(height: 14),
                       _buildSummaryCard(),
                     ],
-
                     if (_sectors.isNotEmpty) ...[
                       const SizedBox(height: 14),
                       const Text(
@@ -929,13 +934,11 @@ class _HomePageState extends State<HomePage> {
                   sector.key ?? '-',
                 ),
                 const SizedBox(height: 8),
-
                 ...sector.blocks.map(
                   (block) => _buildBlockCard(
                     block,
                   ),
                 ),
-
                 if (sector.errors.isNotEmpty) ...[
                   const SizedBox(height: 8),
                   Text(

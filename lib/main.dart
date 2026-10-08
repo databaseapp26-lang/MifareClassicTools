@@ -1,8 +1,5 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_nfc_kit/flutter_nfc_kit.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const MifareClassicToolsApp());
 
@@ -13,10 +10,7 @@ class MifareClassicToolsApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'MIFARE Classic Tools',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.indigo,
-      ),
+      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.indigo),
       home: const ScannerPage(),
     );
   }
@@ -24,16 +18,11 @@ class MifareClassicToolsApp extends StatelessWidget {
 
 class ScannerPage extends StatefulWidget {
   const ScannerPage({super.key});
-
   @override
   State<ScannerPage> createState() => _ScannerPageState();
 }
 
 class _ScannerPageState extends State<ScannerPage> {
-  static const _prefsKey = 'mifare_found_keys_v1';
-
-  // Chiavi già trovate sul tag 90140ABA.
-  // Questa versione esegue solo autenticazione e lettura: NON scrive nulla.
   static const _knownKeys = <_FoundKey>[
     _FoundKey('90140ABA', 0, 'A', 'A0A1A2A3A4A5'),
     _FoundKey('90140ABA', 1, 'B', '8FD0A4F256E9'),
@@ -70,11 +59,9 @@ class _ScannerPageState extends State<ScannerPage> {
             Text(_status, style: const TextStyle(fontSize: 16)),
             const SizedBox(height: 10),
             if (_uid.isNotEmpty) Text('UID: $_uid'),
-            if (_running) ...[
-              const SizedBox(height: 10),
-              const LinearProgressIndicator(),
-            ],
-            const SizedBox(height: 14),
+            const SizedBox(height: 12),
+            if (_running) const LinearProgressIndicator(),
+            const SizedBox(height: 12),
             FilledButton(
               onPressed: _running ? null : _readTag,
               child: const Text('Leggi tag'),
@@ -84,55 +71,44 @@ class _ScannerPageState extends State<ScannerPage> {
               onPressed: _running ? null : _clearResults,
               child: const Text('Pulisci risultati'),
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 12),
             Expanded(
               child: ListView.builder(
                 itemCount: _sectors.length,
                 itemBuilder: (context, index) {
-                  return _sectorCard(_sectors[index]);
+                  final s = _sectors[index];
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Settore ${s.sector} — Key ${s.type} ${s.key}',
+                              style: const TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 5),
+                          Text('${s.readableBlocks}/4 blocchi letti',
+                              style: TextStyle(
+                                color: s.readableBlocks == 4
+                                    ? Colors.green.shade700
+                                    : Colors.orange.shade800,
+                                fontWeight: FontWeight.w600,
+                              )),
+                          const SizedBox(height: 8),
+                          for (final b in s.blocks)
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 7),
+                              child: Text('Blocco ${b.block}: ${b.hex}',
+                                  style: const TextStyle(
+                                      fontFamily: 'monospace', fontSize: 13)),
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
                 },
               ),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _sectorCard(_SectorDump sector) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Settore ${sector.sector} — Key ${sector.type} ${sector.key}',
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '${sector.readableBlocks}/4 blocchi letti',
-              style: TextStyle(
-                color: sector.readableBlocks == 4
-                    ? Colors.green.shade700
-                    : Colors.orange.shade800,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 8),
-            for (final block in sector.blocks)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 7),
-                child: Text(
-                  'Blocco ${block.block}: ${block.hex}',
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 13,
-                  ),
-                ),
-              ),
           ],
         ),
       ),
@@ -147,32 +123,13 @@ class _ScannerPageState extends State<ScannerPage> {
     });
   }
 
-  Future<List<_FoundKey>> _loadSaved() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_prefsKey) ?? const [];
-
-    return raw.map((s) {
-      final p = s.split('|');
-      if (p.length != 4) {
-        return const _FoundKey('', -1, '', '');
-      }
-      return _FoundKey(
-        p[0],
-        int.tryParse(p[1]) ?? -1,
-        p[2],
-        p[3],
-      );
-    }).where((e) => e.uid.isNotEmpty && e.sector >= 0).toList();
-  }
-
   Future<void> _readTag() async {
     if (_running) return;
-
     setState(() {
       _running = true;
-      _status = 'Controllo NFC...';
       _uid = '';
       _sectors.clear();
+      _status = 'Avvia lettura...';
     });
 
     try {
@@ -181,180 +138,113 @@ class _ScannerPageState extends State<ScannerPage> {
         throw StateError('NFC non disponibile o disabilitato.');
       }
 
-      setState(() {
-        _status = 'Avvicina il MIFARE Classic al telefono...';
-      });
-
-      final tag = await FlutterNfcKit.poll(
+      setState(() => _status = 'Avvicina il tag...');
+      final firstTag = await FlutterNfcKit.poll(
         timeout: const Duration(seconds: 30),
         androidPlatformSound: false,
         androidCheckNDEF: false,
       );
-
-      if (tag.type != NFCTagType.mifare_classic) {
-        throw StateError(
-          'Tag rilevato: ${tag.type.name}. Serve un MIFARE Classic.',
-        );
+      if (firstTag.type != NFCTagType.mifare_classic) {
+        throw StateError('Tag rilevato: ${firstTag.type.name}. Serve un MIFARE Classic.');
       }
 
-      final uid = tag.id.toUpperCase();
-      final sectors = _sectorCount(tag);
-
+      final uid = firstTag.id.toUpperCase();
+      final sectorCount = _sectorCount(firstTag);
       setState(() {
         _uid = uid;
-        _status = 'UID $uid — lettura di $sectors settori...';
+        _status = 'UID $uid — lettura settore per settore...';
       });
+      await FlutterNfcKit.finish();
 
-      final saved = await _loadSaved();
+      for (var sector = 0; sector < sectorCount; sector++) {
+        setState(() => _status =
+            'Settore $sector/$sectorCount: avvicina/tieni il tag sul telefono...');
 
-      for (var sector = 0; sector < sectors; sector++) {
-        final candidates = <_FoundKey>[];
-
-        for (final item in saved) {
-          if (item.uid == uid && item.sector == sector) {
-            if (!candidates.any(
-              (x) => x.type == item.type && x.key == item.key,
-            )) {
-              candidates.add(item);
-            }
-          }
-        }
-
-        for (final item in _knownKeys) {
-          if (item.uid == uid && item.sector == sector) {
-            if (!candidates.any(
-              (x) => x.type == item.type && x.key == item.key,
-            )) {
-              candidates.add(item);
-            }
-          }
-        }
-
-        if (candidates.isEmpty) {
-          setState(() {
-            _status = 'Settore $sector: nessuna chiave disponibile.';
-          });
-          continue;
-        }
-
-        _FoundKey? workingKey;
-
-        for (final candidate in candidates) {
-          if (await _authenticate(
-            sector,
-            candidate.type,
-            candidate.key,
-          )) {
-            workingKey = candidate;
-            break;
-          }
-        }
-
-        if (workingKey == null) {
-          setState(() {
-            _status = 'Settore $sector: autenticazione fallita.';
-          });
-          continue;
-        }
-
-        final blocks = <_BlockDump>[];
-        var readable = 0;
-        final firstBlock = sector * 4;
-
-        for (var offset = 0; offset < 4; offset++) {
-          final blockNumber = firstBlock + offset;
-
-          try {
-            final data = await FlutterNfcKit.readBlock(blockNumber);
-            final hex = _toHex(data);
-            blocks.add(_BlockDump(blockNumber, hex));
-            readable++;
-          } catch (_) {
-            blocks.add(_BlockDump(blockNumber, 'ERRORE LETTURA'));
-          }
-        }
-
-        final result = _SectorDump(
-          sector,
-          workingKey.type,
-          workingKey.key,
-          readable,
-          blocks,
+        final tag = await FlutterNfcKit.poll(
+          timeout: const Duration(seconds: 12),
+          androidPlatformSound: false,
+          androidCheckNDEF: false,
         );
+        final currentUid = tag.id.toUpperCase();
+        if (currentUid != uid) {
+          throw StateError('UID cambiato: atteso $uid, rilevato $currentUid.');
+        }
+        if (tag.type != NFCTagType.mifare_classic) {
+          throw StateError('Il tag non è più rilevato come MIFARE Classic.');
+        }
 
-        if (mounted) {
-          setState(() {
-            _sectors.add(result);
-            _status =
-                'Letto settore $sector/$sectors — $readable/4 blocchi.';
-          });
+        final candidate = _knownKeys.firstWhere(
+          (k) => k.uid == uid && k.sector == sector,
+          orElse: () => const _FoundKey('', -1, '', ''),
+        );
+        if (candidate.sector < 0) {
+          await FlutterNfcKit.finish();
+          continue;
+        }
+
+        try {
+          final authenticated = candidate.type == 'A'
+              ? await FlutterNfcKit.authenticateSector<String>(sector, keyA: candidate.key)
+              : await FlutterNfcKit.authenticateSector<String>(sector, keyB: candidate.key);
+
+          if (!authenticated) {
+            setState(() => _status =
+                'Settore $sector: autenticazione FALLITA con ${candidate.type}.');
+            await FlutterNfcKit.finish();
+            continue;
+          }
+
+          setState(() => _status = 'Settore $sector: autenticazione OK — lettura blocchi...');
+          final blocks = <_BlockDump>[];
+          var readable = 0;
+          final firstBlock = sector * 4;
+
+          for (var offset = 0; offset < 4; offset++) {
+            final blockNumber = firstBlock + offset;
+            try {
+              final data = await FlutterNfcKit.readBlock(blockNumber);
+              blocks.add(_BlockDump(blockNumber, _toHex(data)));
+              readable++;
+            } catch (e) {
+              blocks.add(_BlockDump(blockNumber, 'ERRORE LETTURA: $e'));
+            }
+          }
+
+          if (mounted) {
+            setState(() {
+              _sectors.add(_SectorDump(sector, candidate.type, candidate.key, readable, blocks));
+              _status = 'Settore $sector: $readable/4 blocchi letti. Passaggio al successivo...';
+            });
+          }
+        } finally {
+          try {
+            await FlutterNfcKit.finish();
+          } catch (_) {}
         }
       }
 
+      final totalBlocks = _sectors.fold<int>(0, (sum, item) => sum + item.readableBlocks);
       if (mounted) {
-        final totalBlocks = _sectors.fold<int>(
-          0,
-          (sum, item) => sum + item.readableBlocks,
-        );
-
-        setState(() {
-          _status =
-              'Lettura terminata: ${_sectors.length}/$sectors settori, '
-              '$totalBlocks/${sectors * 4} blocchi leggibili.';
-        });
+        setState(() => _status =
+            'Lettura terminata: ${_sectors.length}/$sectorCount settori, '
+            '$totalBlocks/${sectorCount * 4} blocchi leggibili.');
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _status = 'Errore: $e';
-        });
-      }
+      try { await FlutterNfcKit.finish(); } catch (_) {}
+      if (mounted) setState(() => _status = 'Errore: $e');
     } finally {
-      try {
-        await FlutterNfcKit.finish();
-      } catch (_) {}
-
-      if (mounted) {
-        setState(() {
-          _running = false;
-        });
-      }
-    }
-  }
-
-  Future<bool> _authenticate(
-    int sector,
-    String type,
-    String key,
-  ) async {
-    try {
-      if (type == 'A') {
-        return await FlutterNfcKit.authenticateSector<String>(
-          sector,
-          keyA: key,
-        );
-      }
-
-      return await FlutterNfcKit.authenticateSector<String>(
-        sector,
-        keyB: key,
-      );
-    } catch (_) {
-      return false;
+      if (mounted) setState(() => _running = false);
     }
   }
 
   int _sectorCount(NFCTag tag) {
     final sak = (tag.sak ?? '').replaceAll('0x', '').toUpperCase();
-    if (sak == '18') return 40;
-    return 16;
+    return sak == '18' ? 40 : 16;
   }
 
-  String _toHex(Iterable<int> data) {
-    return data
-        .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
-        .join(' ');
-  }
+  String _toHex(Iterable<int> data) => data
+      .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+      .join(' ');
 }
 
 class _FoundKey {
@@ -362,7 +252,6 @@ class _FoundKey {
   final int sector;
   final String type;
   final String key;
-
   const _FoundKey(this.uid, this.sector, this.type, this.key);
 }
 
@@ -372,19 +261,11 @@ class _SectorDump {
   final String key;
   final int readableBlocks;
   final List<_BlockDump> blocks;
-
-  const _SectorDump(
-    this.sector,
-    this.type,
-    this.key,
-    this.readableBlocks,
-    this.blocks,
-  );
+  const _SectorDump(this.sector, this.type, this.key, this.readableBlocks, this.blocks);
 }
 
 class _BlockDump {
   final int block;
   final String hex;
-
   const _BlockDump(this.block, this.hex);
 }

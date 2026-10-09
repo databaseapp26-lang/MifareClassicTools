@@ -22,7 +22,9 @@ jobs:
       - name: Inspect NFC source and build configuration
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $root = $env:SOURCE_DIR
+
           Write-Host "=== NFC and PCSC files ==="
           Get-ChildItem $root -Recurse -File |
             Where-Object {
@@ -38,6 +40,31 @@ jobs:
             Select-String -Pattern 'PCSC|winscard|libusb|acr1281|ACR122|reader' |
             Select-Object -First 100 Path, LineNumber, Line
 
+      - name: Inspect NFC initialization
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = $env:SOURCE_DIR
+          $file = Join-Path $root "src\mfoc.c"
+
+          Write-Host "=== NFC initialization and device discovery ==="
+          if (Test-Path $file) {
+            Select-String -Path $file `
+              -Pattern 'nfc_init|nfc_open|nfc_list_devices|nfc_exit' `
+              -Context 8,12
+          } else {
+            Write-Host "File non trovato: $file"
+            Get-ChildItem (Join-Path $root "src") -Recurse -File |
+              Select-Object -ExpandProperty FullName
+          }
+
+          Write-Host "=== NFC configuration files ==="
+          Get-ChildItem (Join-Path $root "src") -Recurse -File |
+            Where-Object {
+              $_.Name -match 'conf|config|nfc'
+            } |
+            Select-Object -ExpandProperty FullName
+
       - name: Configure Visual Studio
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -51,10 +78,13 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $solution = Join-Path $env:SOURCE_DIR "mfoc-hardnested.sln"
+
           if (!(Test-Path $solution)) {
             throw "Solution Visual Studio non trovata: $solution"
           }
+
           msbuild $solution /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=ClangCL /verbosity:minimal
+
           if ($LASTEXITCODE -ne 0) {
             throw "Compilazione fallita."
           }
@@ -65,6 +95,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $root = $env:SOURCE_DIR
           $package = Join-Path $env:GITHUB_WORKSPACE "mfoc-windows-package"
+
           New-Item -ItemType Directory -Path $package -Force | Out-Null
 
           $exe = Get-ChildItem $root -Recurse -File -Filter "mfoc-hardnested.exe" |
@@ -79,6 +110,7 @@ jobs:
 
           foreach ($dll in @("libusb0.dll", "nfc.dll")) {
             $file = Join-Path $root "src\lib\$dll"
+
             if (Test-Path $file) {
               Copy-Item $file $package
             } else {
@@ -86,6 +118,7 @@ jobs:
             }
           }
 
+          Write-Host "=== File del pacchetto ==="
           Get-ChildItem $package | Select-Object Name, Length
 
       - name: Upload Windows package

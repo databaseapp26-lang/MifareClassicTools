@@ -1,14 +1,16 @@
+
 name: Build MFOC Windows
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
-test:
-runs-on: windows-2022
-steps:
-- name: Verify runner
-shell: pwsh
-run: |
-Write-Host "GitHub Windows runner is ready"
-Write-Host "Architecture: $env:PROCESSOR_ARCHITECTURE"
+  test:
+    runs-on: windows-2022
+    steps:
+      - name: Verify runner
+        shell: pwsh
+        run: |
+          Write-Host "GitHub Windows runner is ready"
+          Write-Host "Architecture: $env:PROCESSOR_ARCHITECTURE"
+

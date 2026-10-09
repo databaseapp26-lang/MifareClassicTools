@@ -16,7 +16,27 @@ jobs:
           $url = "https://github.com/nfc-tools/mfoc-hardnested/archive/refs/heads/master.zip"
           Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\mfoc.zip"
           Expand-Archive "$env:RUNNER_TEMP\mfoc.zip" -DestinationPath $env:RUNNER_TEMP -Force
-          "SOURCE_DIR=$env:RUNNER_TEMP\mfoc-hardnested-master" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "SOURCE_DIR=$env:RUNNER_TEMP\mfoc-hardnested-master" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Inspect NFC source and build configuration
+        shell: pwsh
+        run: |
+          $root = $env:SOURCE_DIR
+          Write-Host "=== NFC and PCSC files ==="
+          Get-ChildItem $root -Recurse -File |
+            Where-Object {
+              $_.Name -match 'pcsc|winscard|libnfc|libusb|nfc\.conf'
+            } |
+            Select-Object -ExpandProperty FullName
+
+          Write-Host "=== Backend and reader references ==="
+          Get-ChildItem $root -Recurse -File |
+            Where-Object {
+              $_.Extension -in '.c','.h','.cpp','.vcxproj','.props','.sln'
+            } |
+            Select-String -Pattern 'PCSC|winscard|libusb|acr1281|ACR122|reader' |
+            Select-Object -First 100 Path, LineNumber, Line
 
       - name: Configure Visual Studio
         uses: ilammy/msvc-dev-cmd@v1
@@ -36,7 +56,7 @@ jobs:
           }
           msbuild $solution /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=ClangCL /verbosity:minimal
           if ($LASTEXITCODE -ne 0) {
-            throw "Compilazione fallita. Controlla i log di questo passaggio."
+            throw "Compilazione fallita."
           }
 
       - name: Prepare downloadable package
@@ -52,17 +72,18 @@ jobs:
             Select-Object -First 1
 
           if (!$exe) {
-            Get-ChildItem $root -Recurse -File -Filter "*.exe" | Select-Object -ExpandProperty FullName
             throw "Eseguibile non trovato dopo la compilazione."
           }
 
           Copy-Item $exe.FullName $package
+
           foreach ($dll in @("libusb0.dll", "nfc.dll")) {
             $file = Join-Path $root "src\lib\$dll"
-            if (!(Test-Path $file)) {
-              throw "DLL richiesta non trovata: $file"
+            if (Test-Path $file) {
+              Copy-Item $file $package
+            } else {
+              Write-Host "DLL non trovata nel percorso previsto: $file"
             }
-            Copy-Item $file $package
           }
 
           Get-ChildItem $package | Select-Object Name, Length

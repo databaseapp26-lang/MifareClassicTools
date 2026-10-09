@@ -5,12 +5,71 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  build:
     runs-on: windows-2022
+
     steps:
-      - name: Verify runner
+      - name: Download MFOC-Hardnested source
         shell: pwsh
         run: |
-          Write-Host "GitHub Windows runner is ready"
-          Write-Host "Architecture: $env:PROCESSOR_ARCHITECTURE"
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/nfc-tools/mfoc-hardnested/archive/refs/heads/master.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\mfoc.zip"
+          Expand-Archive "$env:RUNNER_TEMP\mfoc.zip" -DestinationPath $env:RUNNER_TEMP -Force
+          "SOURCE_DIR=$env:RUNNER_TEMP\mfoc-hardnested-master" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Configure Visual Studio
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Locate MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $solution = Join-Path $env:SOURCE_DIR "mfoc-hardnested.sln"
+          if (!(Test-Path $solution)) {
+            throw "Solution Visual Studio non trovata: $solution"
+          }
+          msbuild $solution /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=ClangCL /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) {
+            throw "Compilazione fallita. Controlla i log di questo passaggio."
+          }
+
+      - name: Prepare downloadable package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $root = $env:SOURCE_DIR
+          $package = Join-Path $env:GITHUB_WORKSPACE "mfoc-windows-package"
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+
+          $exe = Get-ChildItem $root -Recurse -File -Filter "mfoc-hardnested.exe" |
+            Where-Object { $_.FullName -notmatch '\\obj\\' } |
+            Select-Object -First 1
+
+          if (!$exe) {
+            Get-ChildItem $root -Recurse -File -Filter "*.exe" | Select-Object -ExpandProperty FullName
+            throw "Eseguibile non trovato dopo la compilazione."
+          }
+
+          Copy-Item $exe.FullName $package
+          foreach ($dll in @("libusb0.dll", "nfc.dll")) {
+            $file = Join-Path $root "src\lib\$dll"
+            if (!(Test-Path $file)) {
+              throw "DLL richiesta non trovata: $file"
+            }
+            Copy-Item $file $package
+          }
+
+          Get-ChildItem $package | Select-Object Name, Length
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: MFOC-Hardnested-Windows-x64
+          path: mfoc-windows-package/*
+          if-no-files-found: error

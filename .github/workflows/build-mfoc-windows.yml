@@ -14,59 +14,43 @@ jobs:
       - name: Download source
         shell: pwsh
         run: |
-          Invoke-WebRequest `
-            -Uri "https://github.com/nfc-tools/mfoc-hardnested/archive/refs/heads/master.zip" `
-            -OutFile "$env:RUNNER_TEMP\mfoc.zip"
-          Expand-Archive "$env:RUNNER_TEMP\mfoc.zip" `
-            -DestinationPath "$env:RUNNER_TEMP\mfoc"
+          $zip = "$env:RUNNER_TEMP\mfoc.zip"
+          $dest = "$env:RUNNER_TEMP\mfoc"
+          Invoke-WebRequest "https://github.com/nfc-tools/mfoc-hardnested/archive/refs/heads/master.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath $dest
+          $root = Join-Path $dest "mfoc-hardnested-master"
+          "MFOC_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Locate Visual Studio
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
+      - name: Check source files
+        shell: pwsh
+        run: |
+          Get-ChildItem $env:MFOC_ROOT -Recurse -File |
+            Select-Object -First 30 FullName
+          $project = Join-Path $env:MFOC_ROOT "src\mfoc-hardnested.vcxproj"
+          if (!(Test-Path $project)) {
+            throw "Progetto Visual Studio non trovato: $project"
+          }
+
       - name: Build executable
         shell: pwsh
         run: |
-          $root = "$env:RUNNER_TEMP\mfoc\mfoc-hardnested-master"
-          $solution = Join-Path $root "mfoc-hardnested.sln"
-
-          if (!(Test-Path $solution)) {
-            throw "Solution Visual Studio non trovata: $solution"
-          }
-
-          msbuild $solution /m /t:Build `
-            /p:Configuration=Release `
-            /p:Platform=x64 `
-            /p:PlatformToolset=ClangCL `
-            /p:WindowsTargetPlatformVersion=10.0 `
-            /v:minimal
-
+          $project = Join-Path $env:MFOC_ROOT "src\mfoc-hardnested.vcxproj"
+          msbuild $project /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=ClangCL /p:WindowsTargetPlatformVersion=10.0 /v:minimal
           if ($LASTEXITCODE -ne 0) {
             throw "Compilazione non riuscita."
           }
 
-      - name: Collect build files
-        shell: pwsh
-        run: |
-          $root = "$env:RUNNER_TEMP\mfoc\mfoc-hardnested-master"
-          $out = "$env:GITHUB_WORKSPACE\mfoc-windows-build"
-          New-Item -ItemType Directory -Force $out | Out-Null
-
-          Get-ChildItem $root -Recurse -File |
-            Where-Object {
-              $_.Extension -in ".exe", ".dll"
-            } |
-            Copy-Item -Destination $out -Force
-
-          if (!(Get-ChildItem $out -Filter "*.exe")) {
-            throw "Nessun eseguibile trovato."
-          }
-
-      - name: Upload executable
+      - name: Upload build files
         uses: actions/upload-artifact@v4
         with:
           name: mfoc-hardnested-windows-x64
-          path: mfoc-windows-build/*
-          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}\mfoc\mfoc-hardnested-master\bin\**\*.exe
+            ${{ runner.temp }}\mfoc\mfoc-hardnested-master\bin\**\*.dll
+          if-no-files-found: warn
 ```
